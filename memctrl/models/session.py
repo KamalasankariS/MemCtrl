@@ -8,20 +8,6 @@ from .chunk import Chunk
 
 @dataclass
 class Session:
-    """
-    A session represents a single conversation between user and LLM.
-    
-    Attributes:
-        id: Unique session identifier
-        user_id: User who owns this session
-        task_type: Detected task type (medical, code, etc.)
-        chunks: All chunks in this session
-        started_at: Session start time
-        last_active: Last interaction time
-        is_active: Whether session is currently open
-        metadata: Additional information
-    """
-    
     id: str = field(default_factory=lambda: str(uuid4()))
     user_id: str = ""
     task_type: Optional[str] = None
@@ -30,55 +16,48 @@ class Session:
     last_active: datetime = field(default_factory=datetime.now)
     is_active: bool = True
     metadata: Dict[str, Any] = field(default_factory=dict)
-    
+
     def add_chunk(self, chunk: Chunk):
-        """Add chunk to session"""
         self.chunks.append(chunk)
         self.last_active = datetime.now()
-    
+
     def get_total_tokens(self) -> int:
-        """Calculate total tokens in session"""
         return sum(chunk.tokens for chunk in self.chunks)
-    
+
     def get_recent_chunks(self, n: int = 10) -> List[Chunk]:
-        """Get n most recent chunks"""
         return sorted(self.chunks, key=lambda c: c.timestamp, reverse=True)[:n]
-    
+
     def get_pinned_chunks(self) -> List[Chunk]:
-        """Get all pinned chunks"""
         return [chunk for chunk in self.chunks if chunk.is_pinned]
-    
+
     def close(self):
-        """Mark session as closed, delete temporary chunks"""
         self.is_active = False
         self.chunks = [chunk for chunk in self.chunks if not chunk.is_temporary]
-    
+
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary"""
         return {
-            'id': self.id,
-            'user_id': self.user_id,
-            'task_type': self.task_type,
-            'chunk_ids': [chunk.id for chunk in self.chunks],
-            'started_at': self.started_at.isoformat(),
-            'last_active': self.last_active.isoformat(),
-            'is_active': self.is_active,
-            'metadata': self.metadata,
+            "id": self.id,
+            "user_id": self.user_id,
+            "task_type": self.task_type,
+            "chunk_ids": [chunk.id for chunk in self.chunks],
+            "started_at": self.started_at.isoformat(),
+            "last_active": self.last_active.isoformat(),
+            "is_active": self.is_active,
+            "metadata": self.metadata,
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any], chunks: List[Chunk] = None) -> 'Session':
-        """Create session from dictionary"""
+    def from_dict(cls, data: Dict[str, Any], chunks: List[Chunk] = None) -> "Session":
         return cls(
-            id=data['id'],
-            user_id=data['user_id'],
-            task_type=data.get('task_type'),
+            id=data["id"],
+            user_id=data["user_id"],
+            task_type=data.get("task_type"),
             chunks=chunks or [],
-            started_at=datetime.fromisoformat(data['started_at']),
-            last_active=datetime.fromisoformat(data['last_active']),
-            is_active=data['is_active'],
-            metadata=data.get('metadata', {}),
+            started_at=datetime.fromisoformat(data["started_at"]),
+            last_active=datetime.fromisoformat(data["last_active"]),
+            is_active=data["is_active"],
+            metadata=data.get("metadata", {}),
         )
-    
+
     def __repr__(self) -> str:
         return f"Session(id={self.id}, user={self.user_id}, chunks={len(self.chunks)}, active={self.is_active})"
