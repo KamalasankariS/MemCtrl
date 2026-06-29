@@ -1,6 +1,7 @@
 """In-memory embedding store using sentence-transformers for semantic search."""
 
 import logging
+import warnings
 from typing import List, Tuple, Optional
 
 import numpy as np
@@ -54,7 +55,11 @@ class EmbeddingStore:
 
         query_embedding = self.model.encode(query, normalize_embeddings=True)
 
-        matrix = np.stack(self.embeddings)
+        if not np.all(np.isfinite(query_embedding)):
+            return []
+
+        matrix = np.stack(self.embeddings).astype(np.float32)
+        query_embedding = query_embedding.astype(np.float32)
 
         # Filter out any NaN/inf embeddings
         valid_mask = np.all(np.isfinite(matrix), axis=1)
@@ -64,8 +69,19 @@ class EmbeddingStore:
         valid_ids = [self.ids[i] for i in range(len(self.ids)) if valid_mask[i]]
         valid_matrix = matrix[valid_mask]
 
-        similarities = valid_matrix @ query_embedding
-        similarities = np.nan_to_num(similarities, nan=0.0)
+        # Renormalize to unit length for safe cosine similarity
+        norms = np.linalg.norm(valid_matrix, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1.0, norms)
+        valid_matrix = valid_matrix / norms
+
+        q_norm = np.linalg.norm(query_embedding)
+        if q_norm > 0:
+            query_embedding = query_embedding / q_norm
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            similarities = valid_matrix @ query_embedding
+        similarities = np.nan_to_num(similarities, nan=0.0, posinf=1.0, neginf=-1.0)
 
         top_indices = np.argsort(similarities)[::-1][:top_k]
         return [(valid_ids[i], float(similarities[i])) for i in top_indices]
