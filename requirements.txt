@@ -1,7 +1,10 @@
-# Core dependencies
+# Core
 torch>=2.0.0
 transformers>=4.35.0
 sentence-transformers>=2.2.0
+
+# LLM backends (optional: install the one you use)
+anthropic>=0.30.0
 
 # Storage
 duckdb>=0.9.0
@@ -18,7 +21,6 @@ click>=8.0.0
 # Configuration
 pyyaml>=6.0
 python-dotenv>=1.0.0
-pydantic>=2.0.0
 
 # Progress bars
 tqdm>=4.65.0
