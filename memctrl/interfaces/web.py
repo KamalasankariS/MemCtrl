@@ -40,7 +40,7 @@ def create_app(user_id: str = "default", provider: str = "auto") -> gr.Blocks:
         gr.Markdown("# MemCtrl - Task-Aware Memory Management")
 
         with gr.Tab("Chat"):
-            chatbot = gr.ChatInterface(fn=chat_fn, type="messages")
+            chatbot = gr.ChatInterface(fn=chat_fn)
 
         with gr.Tab("Memory Control"):
             with gr.Row():
