@@ -3,7 +3,6 @@
 # Memory budgets (GB)
 tier0_budget_gb: 4.0
 tier1_budget_gb: 4.0
-tier2_budget_gb: .inf
 
 # Model paths
 llm_model: "meta-llama/Llama-2-7b-chat-hf"
