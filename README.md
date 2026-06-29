@@ -1,3 +1,5 @@
+[![CI](https://github.com/KamalasankariS/MemCtrl/actions/workflows/ci.yml/badge.svg)](https://github.com/KamalasankariS/MemCtrl/actions/workflows/ci.yml)
+
 # MemCtrl
 
 **Task-aware memory management for long-context language models.**
