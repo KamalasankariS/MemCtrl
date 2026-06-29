@@ -131,11 +131,51 @@ class Tier1_RAM:
     def _compress(self, chunk: Chunk):
         config = get_config()
         if not chunk.summary:
-            max_summary_tokens = int(chunk.tokens / config.compression_ratio)
-            words = chunk.content.split()
-            summary_words = words[: max_summary_tokens * 2]
-            chunk.summary = " ".join(summary_words) + "..."
+            max_summary_words = int(chunk.tokens / config.compression_ratio) * 2
+            chunk.summary = self._extractive_summarize(chunk.content, max_summary_words)
             chunk.compression_ratio = config.compression_ratio
+
+    @staticmethod
+    def _extractive_summarize(text: str, max_words: int) -> str:
+        """Pick the most informative sentences by word-frequency scoring."""
+        import re
+        sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+        if len(sentences) <= 1 or len(text.split()) <= max_words:
+            return text
+
+        # Score words by frequency (skip stop words)
+        stop = {"the", "a", "an", "is", "are", "was", "were", "in", "on", "at",
+                "to", "for", "of", "and", "or", "but", "it", "i", "you", "he",
+                "she", "we", "they", "this", "that", "with", "from", "by", "as"}
+        word_freq: dict = {}
+        for word in text.lower().split():
+            w = re.sub(r'[^a-z0-9]', '', word)
+            if w and w not in stop:
+                word_freq[w] = word_freq.get(w, 0) + 1
+
+        # Score each sentence
+        scored = []
+        for i, sent in enumerate(sentences):
+            words = [re.sub(r'[^a-z0-9]', '', w.lower()) for w in sent.split()]
+            score = sum(word_freq.get(w, 0) for w in words if w)
+            scored.append((score, i, sent))
+
+        scored.sort(reverse=True)
+
+        # Pick top sentences in original order until budget
+        selected_indices = []
+        total_words = 0
+        for _, idx, sent in scored:
+            sent_words = len(sent.split())
+            if total_words + sent_words > max_words:
+                if not selected_indices:
+                    selected_indices.append(idx)
+                break
+            selected_indices.append(idx)
+            total_words += sent_words
+
+        selected_indices.sort()
+        return " ".join(sentences[i] for i in selected_indices)
 
     def _get_compressed_tokens(self, chunk: Chunk) -> int:
         if chunk.summary:
