@@ -95,5 +95,7 @@ class TaskClassifier(nn.Module):
         return model
 
 
-def load_task_classifier(path: str = "models/task_classifier.pt", device: str = "cpu") -> TaskClassifier:
+def load_task_classifier(
+    path: str = "models/task_classifier.pt", device: str = "cpu",
+) -> TaskClassifier:
     return TaskClassifier.load(path, device)

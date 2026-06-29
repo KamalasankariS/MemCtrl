@@ -3,7 +3,7 @@ import tempfile
 from pathlib import Path
 
 from memctrl.core.tiers import Tier0_GPU, Tier1_RAM, Tier2_Disk, TierManager
-from memctrl.models import Chunk, ChunkPriority
+from memctrl.models import Chunk
 
 
 def test_tier0_basic():

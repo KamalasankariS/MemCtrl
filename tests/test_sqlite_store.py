@@ -16,7 +16,10 @@ def temp_db():
 
 
 def test_store_and_retrieve_chunk(temp_db):
-    chunk = Chunk(id="test_001", content="Test content", tokens=2, chunk_type=ChunkType.FACT, is_pinned=True)
+    chunk = Chunk(
+        id="test_001", content="Test content", tokens=2,
+        chunk_type=ChunkType.FACT, is_pinned=True,
+    )
     chunk.metadata["user_id"] = "kamala"
 
     assert temp_db.store_chunk(chunk)

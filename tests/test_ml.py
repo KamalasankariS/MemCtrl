@@ -1,5 +1,4 @@
 import pytest
-import torch
 
 from memctrl.ml import TaskClassifier, PolicyNetwork, create_hindsight_labels
 from memctrl.models import Chunk, Session, ChunkType
@@ -15,7 +14,8 @@ def test_task_classifier_init():
 
 def test_task_classifier_predict():
     classifier = TaskClassifier()
-    task, probs = classifier.predict("Patient has chest pain and difficulty breathing", return_probs=True)
+    text = "Patient has chest pain and difficulty breathing"
+    task, probs = classifier.predict(text, return_probs=True)
     assert task in classifier.TASK_TYPES
     assert isinstance(probs, dict)
     assert len(probs) == 5

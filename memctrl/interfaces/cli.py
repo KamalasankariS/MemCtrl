@@ -7,7 +7,10 @@ from memctrl import MemoryController
 
 @click.group()
 @click.option("--user", "-u", default="default", help="User ID")
-@click.option("--provider", "-p", default="auto", help="LLM provider: auto, anthropic, huggingface, echo")
+@click.option(
+    "--provider", "-p", default="auto",
+    help="LLM provider: auto, anthropic, huggingface, echo",
+)
 @click.pass_context
 def cli(ctx, user, provider):
     """MemCtrl - Task-Aware Memory Management for LLMs"""

@@ -60,4 +60,7 @@ class Session:
         )
 
     def __repr__(self) -> str:
-        return f"Session(id={self.id}, user={self.user_id}, chunks={len(self.chunks)}, active={self.is_active})"
+        return (
+            f"Session(id={self.id}, user={self.user_id}, "
+            f"chunks={len(self.chunks)}, active={self.is_active})"
+        )

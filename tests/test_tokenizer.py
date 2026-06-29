@@ -1,6 +1,5 @@
 """Tests for real tokenizer."""
 
-import pytest
 from memctrl.tokenizer import count_tokens, get_tokenizer
 
 

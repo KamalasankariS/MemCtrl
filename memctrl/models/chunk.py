@@ -65,8 +65,12 @@ class Chunk:
         priority_map = {
             ChunkPriority.USER_PINNED: float("inf"),
             ChunkPriority.SAFETY_CRITICAL: 100.0,
-            ChunkPriority.POLICY_SUGGESTED: self.importance_score * 99 if self.importance_score else 50.0,
-            ChunkPriority.RECENT: max(0, 50 - (datetime.now() - self.timestamp).total_seconds() / 3600),
+            ChunkPriority.POLICY_SUGGESTED: (
+                self.importance_score * 99 if self.importance_score else 50.0
+            ),
+            ChunkPriority.RECENT: max(
+                0, 50 - (datetime.now() - self.timestamp).total_seconds() / 3600,
+            ),
             ChunkPriority.NORMAL: 25.0,
             ChunkPriority.LOW: 10.0,
         }
@@ -111,4 +115,7 @@ class Chunk:
 
     def __repr__(self) -> str:
         preview = self.content[:50] + "..." if len(self.content) > 50 else self.content
-        return f"Chunk(id={self.id}, tokens={self.tokens}, priority={self.priority.value}, content='{preview}')"
+        return (
+            f"Chunk(id={self.id}, tokens={self.tokens}, "
+            f"priority={self.priority.value}, content='{preview}')"
+        )

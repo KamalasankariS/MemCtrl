@@ -163,7 +163,9 @@ class SQLiteStore:
             cursor.execute("DELETE FROM chunks WHERE id = ?", (chunk_id,))
             return cursor.rowcount > 0
 
-    def search_chunks(self, query: str, user_id: Optional[str] = None, limit: int = 10) -> List[Chunk]:
+    def search_chunks(
+        self, query: str, user_id: Optional[str] = None, limit: int = 10,
+    ) -> List[Chunk]:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             if user_id:
@@ -246,7 +248,8 @@ class SQLiteStore:
             cursor = conn.cursor()
             if active_only:
                 cursor.execute(
-                    "SELECT * FROM sessions WHERE user_id = ? AND is_active = 1 ORDER BY last_active DESC",
+                    "SELECT * FROM sessions WHERE user_id = ? "
+                    "AND is_active = 1 ORDER BY last_active DESC",
                     (user_id,),
                 )
             else:
@@ -295,8 +298,14 @@ class SQLiteStore:
             if not row:
                 return None
             data = dict(row)
-            data["pinned_chunk_ids"] = json.loads(data["pinned_chunk_ids"]) if data["pinned_chunk_ids"] else []
-            data["forgotten_chunk_ids"] = json.loads(data["forgotten_chunk_ids"]) if data["forgotten_chunk_ids"] else []
+            data["pinned_chunk_ids"] = (
+                json.loads(data["pinned_chunk_ids"])
+                if data["pinned_chunk_ids"] else []
+            )
+            data["forgotten_chunk_ids"] = (
+                json.loads(data["forgotten_chunk_ids"])
+                if data["forgotten_chunk_ids"] else []
+            )
             data["preferences"] = json.loads(data["preferences"]) if data["preferences"] else {}
             return User.from_dict(data)
 
@@ -308,7 +317,11 @@ class SQLiteStore:
             if user_id:
                 cursor.execute("SELECT COUNT(*) FROM chunks WHERE user_id = ?", (user_id,))
                 total_chunks = cursor.fetchone()[0]
-                cursor.execute("SELECT COUNT(*) FROM chunks WHERE user_id = ? AND is_pinned = 1", (user_id,))
+                cursor.execute(
+                    "SELECT COUNT(*) FROM chunks "
+                    "WHERE user_id = ? AND is_pinned = 1",
+                    (user_id,),
+                )
                 pinned_chunks = cursor.fetchone()[0]
                 cursor.execute("SELECT COUNT(*) FROM sessions WHERE user_id = ?", (user_id,))
                 total_sessions = cursor.fetchone()[0]

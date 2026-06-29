@@ -1,7 +1,6 @@
 """Gradio web interface for MemCtrl."""
 
 import json
-from typing import Optional
 
 import gradio as gr
 from memctrl import MemoryController
@@ -40,7 +39,7 @@ def create_app(user_id: str = "default", provider: str = "auto") -> gr.Blocks:
         gr.Markdown("# MemCtrl - Task-Aware Memory Management")
 
         with gr.Tab("Chat"):
-            chatbot = gr.ChatInterface(fn=chat_fn)
+            gr.ChatInterface(fn=chat_fn)
 
         with gr.Tab("Memory Control"):
             with gr.Row():

@@ -82,7 +82,11 @@ class MemoryController:
             pinned_text = "\n".join(f"- {c.content}" for c in pinned)
             messages.append({
                 "role": "system",
-                "content": f"You are a helpful assistant. The user has pinned the following information:\n{pinned_text}",
+                "content": (
+                    "You are a helpful assistant. "
+                    "The user has pinned the following "
+                    f"information:\n{pinned_text}"
+                ),
             })
         else:
             messages.append({"role": "system", "content": "You are a helpful assistant."})
@@ -98,7 +102,10 @@ class MemoryController:
         # Relevant past context via semantic search
         relevant = self.tier_manager.tier2.search(query, user_id=self.user_id, limit=5)
         if relevant:
-            context_text = "\n".join(f"- {c.content}" for c in relevant if not c.content.startswith("User: "))
+            context_text = "\n".join(
+                f"- {c.content}" for c in relevant
+                if not c.content.startswith("User: ")
+            )
             if context_text.strip():
                 system_msg = messages[0]
                 system_msg["content"] += f"\n\nRelevant past context:\n{context_text}"
@@ -176,7 +183,11 @@ class MemoryController:
         self.tier_manager.tier2.store.store_user(self.user)
         self._log_action("forget", {"query": query, "num_deleted": len(matches)})
 
-        return {"success": True, "num_deleted": len(matches), "message": f"Forgot {len(matches)} chunks"}
+        n = len(matches)
+        return {
+            "success": True, "num_deleted": n,
+            "message": f"Forgot {n} chunks",
+        }
 
     def forget_confirmed(self, chunk_ids: List[str]) -> Dict[str, Any]:
         for chunk_id in chunk_ids:
@@ -184,9 +195,16 @@ class MemoryController:
             self.user.forget_chunk(chunk_id)
 
         self.tier_manager.tier2.store.store_user(self.user)
-        self._log_action("forget_confirmed", {"chunk_ids": chunk_ids, "num_deleted": len(chunk_ids)})
+        self._log_action(
+            "forget_confirmed",
+            {"chunk_ids": chunk_ids, "num_deleted": len(chunk_ids)},
+        )
 
-        return {"success": True, "num_deleted": len(chunk_ids), "message": f"Forgot {len(chunk_ids)} chunks"}
+        n = len(chunk_ids)
+        return {
+            "success": True, "num_deleted": n,
+            "message": f"Forgot {n} chunks",
+        }
 
     def temporary(self, content: str) -> Dict[str, Any]:
         session = self._get_or_create_session()
@@ -199,7 +217,10 @@ class MemoryController:
 
         self._log_action("temporary", {"chunk_id": chunk.id, "content": content})
 
-        return {"success": True, "chunk_id": chunk.id, "message": "Added to session memory (temporary)"}
+        return {
+            "success": True, "chunk_id": chunk.id,
+            "message": "Added to session memory (temporary)",
+        }
 
     def show_memory(self, category: str = "all") -> Dict[str, Any]:
         result: Dict[str, Any] = {
@@ -254,7 +275,10 @@ class MemoryController:
             "control_mode": self.control_mode,
             "tiers": tier_stats,
             "user": user_stats,
-            "current_session_active": self.current_session is not None and self.current_session.is_active,
+            "current_session_active": (
+                self.current_session is not None
+                and self.current_session.is_active
+            ),
         }
 
     def export_data(self, format: str = "json") -> str:

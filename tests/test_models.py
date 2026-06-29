@@ -1,4 +1,3 @@
-import pytest
 from memctrl.models import Chunk, ChunkPriority, ChunkType, Session, User
 
 

@@ -48,8 +48,12 @@ class PolicyNetwork(nn.Module):
 
         features.append(min(chunk.tokens / 100.0, 1.0))
 
-        medical_terms = ["allergy", "allergic", "medication", "diagnosis", "symptom", "doctor", "patient"]
-        features.append(1.0 if any(term in chunk.content.lower() for term in medical_terms) else 0.0)
+        medical_terms = [
+            "allergy", "allergic", "medication", "diagnosis",
+            "symptom", "doctor", "patient",
+        ]
+        has_medical = any(t in chunk.content.lower() for t in medical_terms)
+        features.append(1.0 if has_medical else 0.0)
 
         code_patterns = ["def ", "class ", "import ", "function", "error", "bug", "```"]
         features.append(1.0 if any(p in chunk.content.lower() for p in code_patterns) else 0.0)
@@ -91,12 +95,23 @@ def train_policy_network(
 ) -> PolicyNetwork:
     from torch.utils.data import DataLoader, TensorDataset
 
-    train_features = torch.tensor([d["features"] for d in train_data], dtype=torch.float32)
-    train_labels = torch.tensor([d["label"] for d in train_data], dtype=torch.float32).unsqueeze(1)
-    val_features = torch.tensor([d["features"] for d in val_data], dtype=torch.float32)
-    val_labels = torch.tensor([d["label"] for d in val_data], dtype=torch.float32).unsqueeze(1)
+    train_features = torch.tensor(
+        [d["features"] for d in train_data], dtype=torch.float32,
+    )
+    train_labels = torch.tensor(
+        [d["label"] for d in train_data], dtype=torch.float32,
+    ).unsqueeze(1)
+    val_features = torch.tensor(
+        [d["features"] for d in val_data], dtype=torch.float32,
+    )
+    val_labels = torch.tensor(
+        [d["label"] for d in val_data], dtype=torch.float32,
+    ).unsqueeze(1)
 
-    train_loader = DataLoader(TensorDataset(train_features, train_labels), batch_size=batch_size, shuffle=True)
+    train_loader = DataLoader(
+        TensorDataset(train_features, train_labels),
+        batch_size=batch_size, shuffle=True,
+    )
     val_loader = DataLoader(TensorDataset(val_features, val_labels), batch_size=batch_size)
 
     input_dim = train_features.shape[1]

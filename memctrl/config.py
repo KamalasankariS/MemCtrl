@@ -36,7 +36,11 @@ class MemCtrlConfig:
     max_tokens_per_chunk: int = 512
     max_context_tokens: int = 4096
 
-    task_types: list = field(default_factory=lambda: ["medical", "code", "writing", "tutoring", "general"])
+    task_types: list = field(
+        default_factory=lambda: [
+            "medical", "code", "writing", "tutoring", "general",
+        ]
+    )
 
     def ensure_directories(self):
         Path(self.data_dir).mkdir(parents=True, exist_ok=True)

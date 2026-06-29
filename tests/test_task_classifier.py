@@ -1,5 +1,3 @@
-import pytest
-import torch
 from memctrl.ml.task_classifier import TaskClassifier
 from transformers import AutoTokenizer
 

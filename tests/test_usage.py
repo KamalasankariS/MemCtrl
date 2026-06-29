@@ -1,4 +1,3 @@
-import pytest
 from memctrl import MemoryController
 
 

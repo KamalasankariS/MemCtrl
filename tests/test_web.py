@@ -1,7 +1,5 @@
 """Tests for Gradio web interface."""
 
-import pytest
-from unittest.mock import patch, MagicMock
 import gradio as gr
 
 
