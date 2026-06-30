@@ -22,6 +22,8 @@ class MemoryController:
         control_mode: str = "hybrid",
         config_path: Optional[str] = None,
         llm: Optional[LLMBackend] = None,
+        provider: Optional[str] = None,
+        api_key: Optional[str] = None,
     ):
         if config_path:
             from .config import MemCtrlConfig, set_config
@@ -36,7 +38,12 @@ class MemoryController:
         self.user = self._load_or_create_user(self.user_id)
         self.current_session: Optional[Session] = None
         self.audit_log: List[Dict[str, Any]] = []
-        self.llm = llm or create_llm_backend(self.config.llm_provider)
+
+        if llm:
+            self.llm = llm
+        else:
+            p = provider or self.config.llm_provider
+            self.llm = create_llm_backend(p, api_key=api_key)
 
     def _load_or_create_user(self, user_id: str) -> User:
         user = self.tier_manager.tier2.store.retrieve_user(user_id)

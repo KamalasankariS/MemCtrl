@@ -9,20 +9,27 @@ from memctrl import MemoryController
 @click.option("--user", "-u", default="default", help="User ID")
 @click.option(
     "--provider", "-p", default="auto",
-    help="LLM provider: auto, anthropic, huggingface, echo",
+    help="LLM provider: auto, anthropic, openai, ollama, echo",
+)
+@click.option(
+    "--api-key", "-k", default=None,
+    help="API key for the LLM provider (never logged or saved)",
 )
 @click.pass_context
-def cli(ctx, user, provider):
+def cli(ctx, user, provider, api_key):
     """MemCtrl - Task-Aware Memory Management for LLMs"""
     ctx.ensure_object(dict)
     ctx.obj["user"] = user
     ctx.obj["provider"] = provider
+    ctx.obj["api_key"] = api_key
 
 
 def _get_controller(ctx) -> MemoryController:
-    from memctrl.llm.backend import create_llm_backend
-    llm = create_llm_backend(ctx.obj["provider"])
-    return MemoryController(user_id=ctx.obj["user"], llm=llm)
+    return MemoryController(
+        user_id=ctx.obj["user"],
+        provider=ctx.obj["provider"],
+        api_key=ctx.obj["api_key"],
+    )
 
 
 @cli.command()
@@ -42,6 +49,7 @@ def interactive(ctx):
     """Start an interactive chat session."""
     controller = _get_controller(ctx)
     click.echo("MemCtrl interactive mode. Type 'quit' to exit.")
+    click.echo("Commands: /pin <text>, /forget <query>, /memory, /stats")
 
     while True:
         try:
@@ -59,7 +67,9 @@ def interactive(ctx):
 
         if user_input.startswith("/forget "):
             result = controller.forget(user_input[8:], confirm=False)
-            click.echo(f"Forgot {result.get('num_deleted', 0)} chunks")
+            click.echo(
+                f"Forgot {result.get('num_deleted', 0)} chunks"
+            )
             continue
 
         if user_input == "/memory":
@@ -103,7 +113,10 @@ def forget(ctx, query):
 
 
 @cli.command()
-@click.option("--category", "-c", default="all", help="Category: all, pinned, session, ai_managed")
+@click.option(
+    "--category", "-c", default="all",
+    help="Category: all, pinned, session, ai_managed",
+)
 @click.pass_context
 def show(ctx, category):
     """Show stored memory."""
@@ -124,7 +137,10 @@ def stats(ctx):
 
 
 @cli.command(name="export")
-@click.option("--format", "-f", "fmt", default="json", help="Export format: json, text")
+@click.option(
+    "--format", "-f", "fmt", default="json",
+    help="Export format: json, text",
+)
 @click.pass_context
 def export_cmd(ctx, fmt):
     """Export user data."""
@@ -140,7 +156,11 @@ def export_cmd(ctx, fmt):
 def start(ctx, port):
     """Launch the Gradio web interface."""
     from memctrl.interfaces.web import create_app
-    app = create_app(user_id=ctx.obj["user"], provider=ctx.obj["provider"])
+    app = create_app(
+        user_id=ctx.obj["user"],
+        provider=ctx.obj["provider"],
+        api_key=ctx.obj["api_key"],
+    )
     app.launch(server_port=port)
 
 

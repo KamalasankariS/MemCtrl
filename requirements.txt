@@ -5,6 +5,7 @@ sentence-transformers>=2.2.0
 
 # LLM backends (optional: install the one you use)
 anthropic>=0.30.0
+openai>=1.0.0
 
 # Storage
 duckdb>=0.9.0
