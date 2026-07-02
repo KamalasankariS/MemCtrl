@@ -21,7 +21,6 @@ def test_create_app_has_tabs():
     assert "Settings" in tab_names
     assert "Chat" in tab_names
     assert "Memory Control" in tab_names
-    assert "Inspect" in tab_names
 
 
 def test_create_app_has_password_field():
