@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 from typing import List, Optional, Dict, TYPE_CHECKING
 from collections import OrderedDict
 
@@ -12,9 +13,60 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Task-aware retention weights: higher = retained longer
+TASK_RETENTION_WEIGHTS = {
+    "medical": 1.5,
+    "code": 1.3,
+    "tutoring": 1.2,
+    "writing": 1.0,
+    "general": 0.8,
+}
 
-class Tier0_GPU:
-    """Active GPU memory with LRU eviction."""
+# Hours before a chunk's recency bonus fully decays, by task type
+TASK_DECAY_HOURS = {
+    "medical": 168.0,   # 1 week
+    "code": 72.0,       # 3 days
+    "tutoring": 48.0,   # 2 days
+    "writing": 24.0,    # 1 day
+    "general": 12.0,    # 12 hours
+}
+
+# Minimum priority to enter Tier0, by task type (lower = easier to promote)
+TASK_PROMOTION_THRESHOLDS = {
+    "medical": 30,
+    "code": 35,
+    "tutoring": 40,
+    "writing": 45,
+    "general": 50,
+}
+
+DEFAULT_PROMOTION_THRESHOLD = 50
+
+
+def compute_task_aware_priority(chunk: Chunk) -> float:
+    """Compute a retention priority that accounts for task type.
+
+    Combines the chunk's base priority with task-specific retention weight
+    and a time-decay curve that varies by task type.
+    """
+    base = chunk.get_priority_value()
+    if base == float("inf"):
+        return base
+
+    task = chunk.task_type or "general"
+    weight = TASK_RETENTION_WEIGHTS.get(task, 1.0)
+    decay_hours = TASK_DECAY_HOURS.get(task, 12.0)
+
+    age_hours = (datetime.now() - chunk.timestamp).total_seconds() / 3600
+    recency_bonus = max(0.0, 1.0 - age_hours / decay_hours) * 20
+
+    access_bonus = min(chunk.access_count * 3, 15)
+
+    return (base * weight) + recency_bonus + access_bonus
+
+
+class Tier0_Active:
+    """Active context window memory with LRU eviction."""
 
     def __init__(self, max_tokens: Optional[int] = None):
         config = get_config()
@@ -86,6 +138,10 @@ class Tier0_GPU:
         self.current_tokens = 0
 
 
+# Backward compatibility alias
+Tier0_GPU = Tier0_Active
+
+
 class Tier1_RAM:
     """Compressed RAM storage with summarization."""
 
@@ -126,9 +182,21 @@ class Tier1_RAM:
         return list(self.storage.values())
 
     def decompress(self, chunk: Chunk) -> Chunk:
-        # TODO: implement LLM-based decompression
-        if chunk.summary and not chunk.content:
-            chunk.content = chunk.summary
+        """Reconstruct full content from summary using LLM, or return summary."""
+        if not chunk.summary:
+            return chunk
+
+        if chunk.content and chunk.content != chunk.summary:
+            return chunk
+
+        if self.llm and self.llm.provider_name != "echo":
+            try:
+                chunk.content = self._llm_decompress(chunk.summary, chunk.task_type)
+                return chunk
+            except Exception as e:
+                logger.warning("LLM decompression failed: %s", e)
+
+        chunk.content = chunk.summary
         return chunk
 
     def get_usage(self) -> Dict[str, float]:
@@ -183,6 +251,31 @@ class Tier1_RAM:
         ]
         return self.llm.generate(messages, max_tokens=max_words * 2)
 
+    def _llm_decompress(
+        self, summary: str, task_type: Optional[str] = None,
+    ) -> str:
+        """Use LLM to expand a summary back into detailed content."""
+        task_hints = {
+            "medical": "Expand with accurate medical detail and terminology.",
+            "code": "Expand with precise technical details and code references.",
+            "writing": "Expand with narrative detail and character context.",
+            "tutoring": "Expand with step-by-step reasoning and explanations.",
+            "general": "Expand with relevant details and context.",
+        }
+        hint = task_hints.get(task_type or "", task_hints["general"])
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Expand the following summary back into detailed content. "
+                    f"{hint} Do not invent facts that aren't implied by the summary."
+                ),
+            },
+            {"role": "user", "content": summary},
+        ]
+        return self.llm.generate(messages, max_tokens=len(summary.split()) * 4)
+
     @staticmethod
     def _extractive_summarize(text: str, max_words: int) -> str:
         """Pick the most informative sentences by word-frequency scoring."""
@@ -191,7 +284,6 @@ class Tier1_RAM:
         if len(sentences) <= 1 or len(text.split()) <= max_words:
             return text
 
-        # Score words by frequency (skip stop words)
         stop = {"the", "a", "an", "is", "are", "was", "were", "in", "on", "at",
                 "to", "for", "of", "and", "or", "but", "it", "i", "you", "he",
                 "she", "we", "they", "this", "that", "with", "from", "by", "as"}
@@ -201,7 +293,6 @@ class Tier1_RAM:
             if w and w not in stop:
                 word_freq[w] = word_freq.get(w, 0) + 1
 
-        # Score each sentence
         scored = []
         for i, sent in enumerate(sentences):
             words = [re.sub(r'[^a-z0-9]', '', w.lower()) for w in sent.split()]
@@ -210,7 +301,6 @@ class Tier1_RAM:
 
         scored.sort(reverse=True)
 
-        # Pick top sentences in original order until budget
         selected_indices = []
         total_words = 0
         for _, idx, sent in scored:
@@ -290,12 +380,12 @@ class TierManager:
 
     def __init__(
         self,
-        tier0: Optional[Tier0_GPU] = None,
+        tier0: Optional[Tier0_Active] = None,
         tier1: Optional[Tier1_RAM] = None,
         tier2: Optional[Tier2_Disk] = None,
         llm: Optional["LLMBackend"] = None,
     ):
-        self.tier0 = tier0 or Tier0_GPU()
+        self.tier0 = tier0 or Tier0_Active()
         self.tier1 = tier1 or Tier1_RAM(llm=llm)
         self.tier2 = tier2 or Tier2_Disk()
         self._task_classifier = None
@@ -315,7 +405,7 @@ class TierManager:
                         self._task_classifier.model_name,
                     )
                 else:
-                    self._task_classifier = False  # Sentinel: no model file
+                    self._task_classifier = False
             except Exception as e:
                 logger.debug("Task classifier not available: %s", e)
                 self._task_classifier = False
@@ -331,6 +421,11 @@ class TierManager:
         except Exception:
             return None
 
+    def _get_promotion_threshold(self, chunk: Chunk) -> float:
+        """Get task-specific promotion threshold for Tier0."""
+        task = chunk.task_type or "general"
+        return TASK_PROMOTION_THRESHOLDS.get(task, DEFAULT_PROMOTION_THRESHOLD)
+
     def add_chunk(self, chunk: Chunk, user_id: str, session_id: str) -> bool:
         chunk.metadata["user_id"] = user_id
         chunk.metadata["session_id"] = session_id
@@ -340,7 +435,8 @@ class TierManager:
 
         self.tier2.add(chunk)
 
-        if chunk.is_pinned or chunk.get_priority_value() > 50:
+        threshold = self._get_promotion_threshold(chunk)
+        if chunk.is_pinned or chunk.get_priority_value() > threshold:
             if self.tier0.add(chunk, force=chunk.is_pinned):
                 return True
 
@@ -353,12 +449,14 @@ class TierManager:
 
         chunk = self.tier1.get(chunk_id)
         if chunk:
+            self.tier1.decompress(chunk)
             self.promote_to_tier0(chunk)
             return chunk
 
         chunk = self.tier2.get(chunk_id)
         if chunk:
-            if chunk.is_pinned or chunk.get_priority_value() > 50:
+            threshold = self._get_promotion_threshold(chunk)
+            if chunk.is_pinned or chunk.get_priority_value() > threshold:
                 self.promote_to_tier0(chunk)
             else:
                 self.promote_to_tier1(chunk)
@@ -389,6 +487,35 @@ class TierManager:
     def demote_to_tier2(self, chunk_id: str):
         self.tier0.remove(chunk_id)
         self.tier1.remove(chunk_id)
+
+    def task_aware_evict(self, num_to_evict: Optional[int] = None) -> int:
+        """Evict chunks from Tier0 using task-aware priority scoring.
+
+        Chunks are ranked by compute_task_aware_priority — general chat
+        is evicted before medical/code. Pinned chunks are never evicted.
+        """
+        tier0_chunks = self.tier0.get_all()
+        if not tier0_chunks:
+            return 0
+
+        if num_to_evict is None:
+            num_to_evict = max(1, len(tier0_chunks) // 5)
+
+        scored = [
+            (compute_task_aware_priority(c), c)
+            for c in tier0_chunks
+            if not c.is_pinned
+        ]
+        scored.sort(key=lambda x: x[0])
+
+        evicted = 0
+        for _, chunk in scored:
+            if evicted >= num_to_evict:
+                break
+            if self.demote_to_tier1(chunk.id):
+                evicted += 1
+
+        return evicted
 
     def get_all_stats(self) -> Dict:
         return {

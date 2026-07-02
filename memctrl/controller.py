@@ -330,17 +330,5 @@ class MemoryController:
             self._auto_evict()
 
     def _auto_evict(self):
-        tier0_chunks = self.tier_manager.tier0.get_all()
-        sorted_chunks = sorted(tier0_chunks, key=lambda c: c.get_priority_value())
-        num_to_evict = max(1, len(sorted_chunks) // 5)
-
-        evicted = 0
-        for chunk in sorted_chunks:
-            if chunk.is_pinned:
-                continue
-            if self.tier_manager.demote_to_tier1(chunk.id):
-                evicted += 1
-            if evicted >= num_to_evict:
-                break
-
+        evicted = self.tier_manager.task_aware_evict()
         self._log_action("auto_evict", {"num_evicted": evicted, "reason": "memory_pressure"})
