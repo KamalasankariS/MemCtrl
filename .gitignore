@@ -20,6 +20,7 @@ data/user_data/
 data/datasets/
 data/task_classifier_data.json
 models/*.pt
+results/
 
 .env
 .venv/

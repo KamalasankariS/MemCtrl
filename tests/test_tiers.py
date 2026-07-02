@@ -128,3 +128,113 @@ def test_tier_manager_stats(temp_tier2):
     assert "tier0" in stats
     assert "tier1" in stats
     assert "tier2" in stats
+
+
+# -- LLM-powered compression --
+
+def test_tier1_llm_compression():
+    from unittest.mock import MagicMock
+
+    mock_llm = MagicMock()
+    mock_llm.provider_name = "anthropic"
+    mock_llm.generate.return_value = "LLM summary of the content"
+
+    tier1 = Tier1_RAM(max_tokens=1000, llm=mock_llm)
+    chunk = Chunk(id="llm1", content="A very long piece of text " * 20, tokens=100)
+    tier1.add(chunk)
+
+    assert chunk.summary == "LLM summary of the content"
+    mock_llm.generate.assert_called_once()
+    call_msgs = mock_llm.generate.call_args[0][0]
+    assert "Summarize" in call_msgs[0]["content"]
+
+
+def test_tier1_llm_compression_with_task_type():
+    from unittest.mock import MagicMock
+
+    mock_llm = MagicMock()
+    mock_llm.provider_name = "openai"
+    mock_llm.generate.return_value = "Medical summary"
+
+    tier1 = Tier1_RAM(max_tokens=1000, llm=mock_llm)
+    chunk = Chunk(id="med1", content="Patient has symptoms " * 20, tokens=100)
+    chunk.task_type = "medical"
+    tier1.add(chunk)
+
+    call_msgs = mock_llm.generate.call_args[0][0]
+    assert "medical terms" in call_msgs[0]["content"]
+
+
+def test_tier1_llm_compression_fallback():
+    from unittest.mock import MagicMock
+
+    mock_llm = MagicMock()
+    mock_llm.provider_name = "anthropic"
+    mock_llm.generate.side_effect = Exception("API error")
+
+    tier1 = Tier1_RAM(max_tokens=1000, llm=mock_llm)
+    chunk = Chunk(
+        id="fall1",
+        content="First sentence here. Second sentence here. Third one too.",
+        tokens=50,
+    )
+    tier1.add(chunk)
+
+    # Falls back to extractive — should still have a summary
+    assert chunk.summary is not None
+    assert len(chunk.summary) > 0
+
+
+def test_tier1_echo_llm_skipped():
+    from unittest.mock import MagicMock
+
+    mock_llm = MagicMock()
+    mock_llm.provider_name = "echo"
+
+    tier1 = Tier1_RAM(max_tokens=1000, llm=mock_llm)
+    chunk = Chunk(
+        id="echo1",
+        content="Some content. Another sentence. More text here.",
+        tokens=50,
+    )
+    tier1.add(chunk)
+
+    # Echo LLM should be skipped — uses extractive instead
+    mock_llm.generate.assert_not_called()
+    assert chunk.summary is not None
+
+
+def test_tier1_no_llm_uses_extractive():
+    tier1 = Tier1_RAM(max_tokens=1000, llm=None)
+    chunk = Chunk(
+        id="noLLM",
+        content="Important fact one. Less important. Critical detail here.",
+        tokens=50,
+    )
+    tier1.add(chunk)
+
+    assert chunk.summary is not None
+    assert len(chunk.summary) > 0
+
+
+# -- Task classification in TierManager --
+
+def test_tier_manager_classifies_task(temp_tier2):
+    """TierManager should attempt classification but gracefully handle missing model."""
+    manager = TierManager(tier2=temp_tier2)
+    chunk = Chunk(id="cls1", content="What is the dosage for ibuprofen?", tokens=10)
+    manager.add_chunk(chunk, user_id="test", session_id="s1")
+
+    # If no trained model exists, task_type stays None — that's OK
+    # The point is it doesn't crash
+    assert chunk.metadata["user_id"] == "test"
+
+
+def test_tier_manager_passes_llm_to_tier1(temp_tier2):
+    from unittest.mock import MagicMock
+
+    mock_llm = MagicMock()
+    mock_llm.provider_name = "anthropic"
+    manager = TierManager(tier2=temp_tier2, llm=mock_llm)
+
+    assert manager.tier1.llm is mock_llm
