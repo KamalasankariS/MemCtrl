@@ -33,17 +33,18 @@ class MemoryController:
 
         self.config = get_config()
         self.control_mode = control_mode
-        self.tier_manager = TierManager()
-        self.user_id = user_id or str(uuid4())
-        self.user = self._load_or_create_user(self.user_id)
-        self.current_session: Optional[Session] = None
-        self.audit_log: List[Dict[str, Any]] = []
 
         if llm:
             self.llm = llm
         else:
             p = provider or self.config.llm_provider
             self.llm = create_llm_backend(p, api_key=api_key)
+
+        self.tier_manager = TierManager(llm=self.llm)
+        self.user_id = user_id or str(uuid4())
+        self.user = self._load_or_create_user(self.user_id)
+        self.current_session: Optional[Session] = None
+        self.audit_log: List[Dict[str, Any]] = []
 
     def _load_or_create_user(self, user_id: str) -> User:
         user = self.tier_manager.tier2.store.retrieve_user(user_id)

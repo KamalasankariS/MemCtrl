@@ -1,10 +1,16 @@
-from typing import List, Optional, Dict
+import logging
+from typing import List, Optional, Dict, TYPE_CHECKING
 from collections import OrderedDict
 
 from ..models import Chunk, ChunkPriority
 from ..config import get_config
 from ..storage.sqlite_store import SQLiteStore
 from ..storage.embedding_store import EmbeddingStore
+
+if TYPE_CHECKING:
+    from ..llm.backend import LLMBackend
+
+logger = logging.getLogger(__name__)
 
 
 class Tier0_GPU:
@@ -83,11 +89,16 @@ class Tier0_GPU:
 class Tier1_RAM:
     """Compressed RAM storage with summarization."""
 
-    def __init__(self, max_tokens: Optional[int] = None):
+    def __init__(
+        self,
+        max_tokens: Optional[int] = None,
+        llm: Optional["LLMBackend"] = None,
+    ):
         config = get_config()
         self.max_tokens = max_tokens or config.get_tier1_tokens()
         self.current_tokens = 0
         self.storage: Dict[str, Chunk] = {}
+        self.llm = llm
 
     def add(self, chunk: Chunk, compressed: bool = False) -> bool:
         if not compressed and not chunk.summary:
@@ -130,10 +141,47 @@ class Tier1_RAM:
 
     def _compress(self, chunk: Chunk):
         config = get_config()
-        if not chunk.summary:
-            max_summary_words = int(chunk.tokens / config.compression_ratio) * 2
-            chunk.summary = self._extractive_summarize(chunk.content, max_summary_words)
-            chunk.compression_ratio = config.compression_ratio
+        if chunk.summary:
+            return
+        max_summary_words = int(chunk.tokens / config.compression_ratio) * 2
+
+        if self.llm and self.llm.provider_name != "echo":
+            try:
+                chunk.summary = self._llm_summarize(
+                    chunk.content, max_summary_words, chunk.task_type,
+                )
+                chunk.compression_ratio = config.compression_ratio
+                return
+            except Exception as e:
+                logger.warning("LLM compression failed, falling back to extractive: %s", e)
+
+        chunk.summary = self._extractive_summarize(chunk.content, max_summary_words)
+        chunk.compression_ratio = config.compression_ratio
+
+    def _llm_summarize(
+        self, text: str, max_words: int, task_type: Optional[str] = None,
+    ) -> str:
+        """Use the user's LLM backend to produce a task-aware summary."""
+        task_hints = {
+            "medical": "Preserve all medical terms, dosages, symptoms, and diagnoses.",
+            "code": "Preserve function names, error messages, and technical details.",
+            "writing": "Preserve the narrative arc, key characters, and themes.",
+            "tutoring": "Preserve the problem statement, key steps, and final answer.",
+            "general": "Preserve the main topic and key facts.",
+        }
+        hint = task_hints.get(task_type or "", task_hints["general"])
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"Summarize the following text in at most {max_words} words. "
+                    f"{hint} Be concise but preserve critical information."
+                ),
+            },
+            {"role": "user", "content": text},
+        ]
+        return self.llm.generate(messages, max_tokens=max_words * 2)
 
     @staticmethod
     def _extractive_summarize(text: str, max_words: int) -> str:
@@ -245,14 +293,50 @@ class TierManager:
         tier0: Optional[Tier0_GPU] = None,
         tier1: Optional[Tier1_RAM] = None,
         tier2: Optional[Tier2_Disk] = None,
+        llm: Optional["LLMBackend"] = None,
     ):
         self.tier0 = tier0 or Tier0_GPU()
-        self.tier1 = tier1 or Tier1_RAM()
+        self.tier1 = tier1 or Tier1_RAM(llm=llm)
         self.tier2 = tier2 or Tier2_Disk()
+        self._task_classifier = None
+        self._task_tokenizer = None
+
+    def _classify_task(self, text: str) -> Optional[str]:
+        """Classify the task type of a chunk using the trained classifier."""
+        if self._task_classifier is None:
+            try:
+                from ..ml.task_classifier import TaskClassifier
+                from pathlib import Path
+                model_path = Path(__file__).parent.parent.parent / "models" / "task_classifier.pt"
+                if model_path.exists():
+                    self._task_classifier = TaskClassifier.load(str(model_path))
+                    from transformers import AutoTokenizer
+                    self._task_tokenizer = AutoTokenizer.from_pretrained(
+                        self._task_classifier.model_name,
+                    )
+                else:
+                    self._task_classifier = False  # Sentinel: no model file
+            except Exception as e:
+                logger.debug("Task classifier not available: %s", e)
+                self._task_classifier = False
+
+        if self._task_classifier is False:
+            return None
+
+        try:
+            label, _ = self._task_classifier.predict(
+                text, tokenizer=self._task_tokenizer,
+            )
+            return label
+        except Exception:
+            return None
 
     def add_chunk(self, chunk: Chunk, user_id: str, session_id: str) -> bool:
         chunk.metadata["user_id"] = user_id
         chunk.metadata["session_id"] = session_id
+
+        if not chunk.task_type:
+            chunk.task_type = self._classify_task(chunk.content)
 
         self.tier2.add(chunk)
 
