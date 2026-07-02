@@ -5,7 +5,7 @@ from uuid import uuid4
 from datetime import datetime
 
 from .models import Chunk, Session, User, ChunkType, ChunkPriority
-from .core.tiers import TierManager
+from .core.tiers import TierManager, compute_task_aware_priority
 from .config import get_config
 from .tokenizer import count_tokens
 from .llm.backend import LLMBackend, create_llm_backend
@@ -45,6 +45,7 @@ class MemoryController:
         self.user = self._load_or_create_user(self.user_id)
         self.current_session: Optional[Session] = None
         self.audit_log: List[Dict[str, Any]] = []
+        self.trash: List[Dict[str, Any]] = []
 
     def _load_or_create_user(self, user_id: str) -> User:
         user = self.tier_manager.tier2.store.retrieve_user(user_id)
@@ -185,6 +186,13 @@ class MemoryController:
             }
 
         for chunk in matches:
+            self.trash.append({
+                "chunk_id": chunk.id,
+                "content": chunk.content,
+                "task_type": chunk.task_type,
+                "timestamp": chunk.timestamp.isoformat(),
+                "deleted_at": datetime.now().isoformat(),
+            })
             self.tier_manager.remove_chunk(chunk.id)
             self.user.forget_chunk(chunk.id)
 
@@ -194,7 +202,7 @@ class MemoryController:
         n = len(matches)
         return {
             "success": True, "num_deleted": n,
-            "message": f"Forgot {n} chunks",
+            "message": f"Forgot {n} chunks (moved to trash)",
         }
 
     def forget_confirmed(self, chunk_ids: List[str]) -> Dict[str, Any]:
@@ -316,6 +324,76 @@ class MemoryController:
             f"Audit Log Entries: {len(data['audit_log'])}",
         ]
         return "\n".join(lines)
+
+    def get_dashboard(self) -> Dict[str, Any]:
+        """Full memory state for the UI dashboard."""
+        tier0_chunks = self.tier_manager.tier0.get_all()
+        tier1_chunks = self.tier_manager.tier1.get_all()
+        tier0_usage = self.tier_manager.tier0.get_usage()
+        tier1_usage = self.tier_manager.tier1.get_usage()
+
+        def _chunk_info(c: Chunk, tier: str) -> Dict[str, Any]:
+            info: Dict[str, Any] = {
+                "chunk_id": c.id,
+                "content": c.content[:150] + "..." if len(c.content) > 150 else c.content,
+                "task_type": c.task_type or "unclassified",
+                "tier": tier,
+                "is_pinned": c.is_pinned,
+                "timestamp": c.timestamp.isoformat(),
+                "access_count": c.access_count,
+                "tokens": c.tokens,
+                "priority": round(compute_task_aware_priority(c), 1),
+            }
+            if c.summary:
+                info["summary"] = c.summary[:100] + "..." if len(c.summary) > 100 else c.summary
+            return info
+
+        pinned = [_chunk_info(c, "active") for c in tier0_chunks if c.is_pinned]
+        active = [_chunk_info(c, "active") for c in tier0_chunks if not c.is_pinned]
+        compressed = [_chunk_info(c, "compressed") for c in tier1_chunks]
+
+        return {
+            "pinned": pinned,
+            "active": active,
+            "compressed": compressed,
+            "trash": self.trash[-20:],
+            "memory_pressure": {
+                "tier0_pct": round(tier0_usage["utilization"] * 100, 1),
+                "tier0_tokens": tier0_usage["current_tokens"],
+                "tier0_max": tier0_usage["max_tokens"],
+                "tier1_pct": round(tier1_usage["utilization"] * 100, 1),
+                "tier1_tokens": tier1_usage["current_tokens"],
+                "tier1_max": tier1_usage["max_tokens"],
+            },
+        }
+
+    def restore_from_trash(self, chunk_id: str) -> Dict[str, Any]:
+        """Restore a chunk from trash back into memory."""
+        for i, item in enumerate(self.trash):
+            if item["chunk_id"] == chunk_id:
+                session = self._get_or_create_session()
+                chunk = self._create_chunk(item["content"])
+                chunk.id = item["chunk_id"]
+                chunk.task_type = item.get("task_type")
+                self.tier_manager.add_chunk(
+                    chunk, user_id=self.user_id, session_id=session.id,
+                )
+                self.trash.pop(i)
+                self._log_action("restore", {"chunk_id": chunk_id})
+                return {"success": True, "message": f"Restored chunk {chunk_id[:8]}..."}
+        return {"success": False, "message": "Chunk not found in trash"}
+
+    def unpin(self, chunk_id: str) -> Dict[str, Any]:
+        """Unpin a pinned chunk."""
+        chunk = self.tier_manager.tier0.get(chunk_id)
+        if chunk and chunk.is_pinned:
+            chunk.is_pinned = False
+            chunk.priority = ChunkPriority.NORMAL
+            self.user.forget_chunk(chunk_id)
+            self.tier_manager.tier2.store.store_user(self.user)
+            self._log_action("unpin", {"chunk_id": chunk_id})
+            return {"success": True, "message": f"Unpinned {chunk_id[:8]}..."}
+        return {"success": False, "message": "Chunk not found or not pinned"}
 
     def close_session(self):
         if self.current_session:
