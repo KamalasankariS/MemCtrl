@@ -163,9 +163,20 @@ class SQLiteStore:
             cursor.execute("DELETE FROM chunks WHERE id = ?", (chunk_id,))
             return cursor.rowcount > 0
 
+    @staticmethod
+    def _sanitize_fts_query(query: str) -> str:
+        """Remove characters that break FTS5 MATCH syntax."""
+        import re
+        sanitized = re.sub(r'[^\w\s]', ' ', query)
+        words = sanitized.split()
+        if not words:
+            return '""'
+        return " ".join(words)
+
     def search_chunks(
         self, query: str, user_id: Optional[str] = None, limit: int = 10,
     ) -> List[Chunk]:
+        fts_query = self._sanitize_fts_query(query)
         with self._get_connection() as conn:
             cursor = conn.cursor()
             if user_id:
@@ -176,7 +187,7 @@ class SQLiteStore:
                     WHERE chunks_fts MATCH ? AND chunks.user_id = ?
                     ORDER BY rank LIMIT ?
                     """,
-                    (query, user_id, limit),
+                    (fts_query, user_id, limit),
                 )
             else:
                 cursor.execute(
@@ -186,7 +197,7 @@ class SQLiteStore:
                     WHERE chunks_fts MATCH ?
                     ORDER BY rank LIMIT ?
                     """,
-                    (query, limit),
+                    (fts_query, limit),
                 )
             return [self._row_to_chunk(row) for row in cursor.fetchall()]
 
