@@ -122,7 +122,164 @@ class MemoryController:
         messages.append({"role": "user", "content": query})
         return messages
 
-    # -- Public API --
+    # -- SDK API (Option 3: Context Budget Optimizer) --
+
+    def add_message(self, role: str, content: str) -> Dict[str, Any]:
+        """Record a message into the memory system.
+
+        Call this for every user message and every assistant response.
+        MemCtrl will chunk it, classify its task type, and manage its
+        lifecycle across tiers automatically.
+
+        Args:
+            role: "user", "assistant", or "system"
+            content: The message text
+
+        Returns:
+            Dict with chunk_id, task_type, tokens, and tier placement.
+        """
+        session = self._get_or_create_session()
+        prefix = {"user": "User: ", "assistant": "Assistant: ", "system": "System: "}
+        chunk = self._create_chunk(f"{prefix.get(role, '')}{content}")
+        self.tier_manager.add_chunk(chunk, user_id=self.user_id, session_id=session.id)
+        session.add_chunk(chunk)
+
+        if self.tier_manager.tier0.is_full():
+            self._handle_memory_pressure()
+
+        self._log_action("add_message", {
+            "role": role, "chunk_id": chunk.id, "session_id": session.id,
+        })
+
+        return {
+            "chunk_id": chunk.id,
+            "task_type": chunk.task_type,
+            "tokens": chunk.tokens,
+            "tier": "active" if self.tier_manager.tier0.get(chunk.id) else "compressed",
+        }
+
+    def optimize(self, max_tokens: int = 4096) -> List[Dict[str, str]]:
+        """Build an optimized message list that fits within a token budget.
+
+        This is the core SDK method. Call it before every LLM API request.
+        It returns a standard messages list (system/user/assistant dicts)
+        that fits within max_tokens by:
+          1. Always including pinned memories in the system prompt
+          2. Including recent messages in full (newest first)
+          3. Replacing older messages with compressed summaries
+          4. Dropping lowest-priority messages when budget is exceeded
+
+        Args:
+            max_tokens: Maximum total tokens for the returned messages.
+
+        Returns:
+            List of {"role": ..., "content": ...} dicts ready for any LLM API.
+        """
+        messages: List[Dict[str, str]] = []
+        budget = max_tokens
+
+        # 1. System prompt with pinned memories (always included)
+        pinned = self.tier_manager.tier2.get_pinned(self.user_id)
+        system_parts = ["You are a helpful assistant."]
+        if pinned:
+            pinned_text = "\n".join(f"- {c.content}" for c in pinned)
+            system_parts.append(f"The user has pinned the following information:\n{pinned_text}")
+
+        system_content = " ".join(system_parts)
+        system_tokens = count_tokens(system_content, self.config.tokenizer_model)
+        budget -= system_tokens
+
+        # 2. Gather all conversation chunks, scored by priority
+        tier0_chunks = self.tier_manager.tier0.get_all()
+        tier1_chunks = self.tier_manager.tier1.get_all()
+
+        conversation_chunks = []
+        for c in tier0_chunks:
+            if not c.is_pinned:
+                conversation_chunks.append(("full", c))
+        for c in tier1_chunks:
+            conversation_chunks.append(("compressed", c))
+
+        # Sort by timestamp (oldest first for final output)
+        conversation_chunks.sort(key=lambda x: x[1].timestamp)
+
+        # 3. Fill budget: newest messages get full content, older get summaries
+        selected: List[Dict[str, str]] = []
+        tokens_used = 0
+
+        # Process newest first to prioritize recent context
+        for source, chunk in reversed(conversation_chunks):
+            if source == "full":
+                text = chunk.content
+                tok = chunk.tokens
+            else:
+                text = chunk.summary or chunk.content
+                tok = count_tokens(text, self.config.tokenizer_model)
+
+            if tokens_used + tok > budget:
+                # Try compressed version of full chunks
+                if source == "full" and chunk.summary:
+                    text = chunk.summary
+                    tok = count_tokens(text, self.config.tokenizer_model)
+                    if tokens_used + tok > budget:
+                        continue
+                else:
+                    continue
+
+            # Parse role from content prefix
+            if text.startswith("User: "):
+                selected.append({"role": "user", "content": text[6:], "_ts": chunk.timestamp})
+            elif text.startswith("Assistant: "):
+                selected.append({"role": "assistant", "content": text[11:], "_ts": chunk.timestamp})
+            elif text.startswith("System: "):
+                selected.append({"role": "system", "content": text[8:], "_ts": chunk.timestamp})
+            else:
+                selected.append({"role": "user", "content": text, "_ts": chunk.timestamp})
+
+            tokens_used += tok
+
+        # 4. Relevant past context via semantic search (if budget allows)
+        remaining = budget - tokens_used
+        if remaining > 100 and self.current_session:
+            recent_chunks = self.current_session.get_recent_chunks(3)
+            if recent_chunks:
+                latest_content = recent_chunks[0].content
+                if latest_content.startswith("User: "):
+                    latest_content = latest_content[6:]
+                relevant = self.tier_manager.tier2.search(
+                    latest_content, user_id=self.user_id, limit=3,
+                )
+                context_parts = []
+                context_tokens = 0
+                for c in relevant:
+                    if not c.content.startswith("User: ") and not c.content.startswith("Assistant: "):
+                        text = c.summary or c.content
+                        tok = count_tokens(text, self.config.tokenizer_model)
+                        if context_tokens + tok <= remaining - 20:
+                            context_parts.append(f"- {text}")
+                            context_tokens += tok
+
+                if context_parts:
+                    system_content += "\n\nRelevant past context:\n" + "\n".join(context_parts)
+
+        # 5. Assemble final messages
+        messages.append({"role": "system", "content": system_content})
+
+        # Sort selected back to chronological order and strip internal _ts
+        selected.sort(key=lambda m: m.get("_ts", datetime.min))
+        for msg in selected:
+            msg.pop("_ts", None)
+            messages.append(msg)
+
+        self._log_action("optimize", {
+            "max_tokens": max_tokens,
+            "messages_returned": len(messages),
+            "tokens_used": system_tokens + tokens_used,
+        })
+
+        return messages
+
+    # -- Chat API (used by Gradio UI) --
 
     def chat(self, query: str) -> str:
         session = self._get_or_create_session()
@@ -390,6 +547,8 @@ class MemoryController:
             chunk.is_pinned = False
             chunk.priority = ChunkPriority.NORMAL
             self.user.forget_chunk(chunk_id)
+            # Update the chunk in Tier2 so get_pinned() reflects the change
+            self.tier_manager.tier2.store.store_chunk(chunk)
             self.tier_manager.tier2.store.store_user(self.user)
             self._log_action("unpin", {"chunk_id": chunk_id})
             return {"success": True, "message": f"Unpinned {chunk_id[:8]}..."}
