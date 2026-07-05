@@ -7,7 +7,6 @@
 """
 import pytest
 import tempfile
-import time
 
 from memctrl import MemoryController, wrap, WrappedClient
 from memctrl.config import MemCtrlConfig, set_config
@@ -429,7 +428,11 @@ class TestEntityPreservingCompression:
 
     def test_entities_appended_to_summary(self, ctrl):
         # Add a message with entities that will go to tier1 (compressed)
-        ctrl.add_message("user", "Deploy Flask app on port 8080 at https://api.example.com/webhook using version 3.11.4")
+        msg = (
+            "Deploy Flask app on port 8080 at"
+            " https://api.example.com/webhook using version 3.11.4"
+        )
+        ctrl.add_message("user", msg)
         tier1_chunks = ctrl.tier_manager.tier1.get_all()
         if tier1_chunks:
             chunk = tier1_chunks[0]

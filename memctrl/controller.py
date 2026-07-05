@@ -46,8 +46,9 @@ class MemoryController:
         self.user = self._load_or_create_user(self.user_id)
         self.current_session: Optional[Session] = None
         # Load persisted trash and audit log from SQLite
-        self.trash: List[Dict[str, Any]] = self.tier_manager.tier2.store.get_trash(self.user_id)
-        self.audit_log: List[Dict[str, Any]] = self.tier_manager.tier2.store.get_audit_log(self.user_id)
+        store = self.tier_manager.tier2.store
+        self.trash: List[Dict[str, Any]] = store.get_trash(self.user_id)
+        self.audit_log: List[Dict[str, Any]] = store.get_audit_log(self.user_id)
 
     def _load_or_create_user(self, user_id: str) -> User:
         user = self.tier_manager.tier2.store.retrieve_user(user_id)
@@ -256,7 +257,9 @@ class MemoryController:
                 context_parts = []
                 context_tokens = 0
                 for c in relevant:
-                    if not c.content.startswith("User: ") and not c.content.startswith("Assistant: "):
+                    is_user = c.content.startswith("User: ")
+                    is_asst = c.content.startswith("Assistant: ")
+                    if not is_user and not is_asst:
                         text = c.summary or c.content
                         tok = count_tokens(text, self.config.tokenizer_model)
                         if context_tokens + tok <= remaining - 20:
@@ -609,7 +612,10 @@ class MemoryController:
                         "category": category,
                         "matched_text": matched_text,
                         "content_preview": content[:100] + "..." if len(content) > 100 else content,
-                        "reason": f"Detected {category.replace('_', ' ')} — this looks important. Pin it?",
+                        "reason": (
+                            f"Detected {category.replace('_', ' ')}"
+                            " — this looks important. Pin it?"
+                        ),
                     })
 
         return suggestions
@@ -645,7 +651,10 @@ class MemoryController:
                 age_hours = (datetime.now() - chunk.last_accessed).total_seconds() / 3600
                 suggestions.append({
                     "chunk_id": chunk.id,
-                    "content_preview": chunk.content[:80] + "..." if len(chunk.content) > 80 else chunk.content,
+                    "content_preview": (
+                        chunk.content[:80] + "..."
+                        if len(chunk.content) > 80 else chunk.content
+                    ),
                     "task_type": chunk.task_type or "unclassified",
                     "tokens": chunk.tokens,
                     "last_accessed": chunk.last_accessed.isoformat(),
@@ -739,10 +748,25 @@ class MemoryController:
             "remaining": remaining,
             "usage_pct": usage_pct,
             "breakdown": {
-                "system_prompt": {"tokens": system_tokens - pinned_tokens, "label": "System prompt"},
-                "pinned": {"tokens": pinned_tokens, "count": len(pinned), "label": "Pinned memories"},
-                "active": {"tokens": active_tokens, "count": active_count, "label": "Active messages"},
-                "compressed": {"tokens": compressed_tokens, "count": compressed_count, "label": "Compressed messages"},
+                "system_prompt": {
+                    "tokens": system_tokens - pinned_tokens,
+                    "label": "System prompt",
+                },
+                "pinned": {
+                    "tokens": pinned_tokens,
+                    "count": len(pinned),
+                    "label": "Pinned memories",
+                },
+                "active": {
+                    "tokens": active_tokens,
+                    "count": active_count,
+                    "label": "Active messages",
+                },
+                "compressed": {
+                    "tokens": compressed_tokens,
+                    "count": compressed_count,
+                    "label": "Compressed messages",
+                },
             },
             "recommendations": self._budget_recommendations(
                 usage_pct, pinned_tokens, active_tokens, compressed_tokens, remaining,
@@ -754,11 +778,20 @@ class MemoryController:
     ) -> List[str]:
         recs = []
         if usage_pct > 90:
-            recs.append("Context is over 90% full. Consider forgetting old messages or running suggest_cleanup().")
+            recs.append(
+                "Context is over 90% full. Consider forgetting"
+                " old messages or running suggest_cleanup()."
+            )
         if pinned_tokens > active_tokens and pinned_tokens > 500:
-            recs.append(f"Pinned memories use {pinned_tokens} tokens. Review pins — unpin anything no longer needed.")
+            recs.append(
+                f"Pinned memories use {pinned_tokens} tokens."
+                " Review pins — unpin anything no longer needed."
+            )
         if remaining < 200:
-            recs.append(f"Only {remaining} tokens remaining. New messages may trigger auto-eviction.")
+            recs.append(
+                f"Only {remaining} tokens remaining."
+                " New messages may trigger auto-eviction."
+            )
         if usage_pct < 30:
             recs.append("Plenty of budget remaining. No action needed.")
         return recs
