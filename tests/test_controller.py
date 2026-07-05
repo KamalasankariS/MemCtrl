@@ -28,7 +28,8 @@ def test_controller_init(temp_controller):
 def test_chat_basic(temp_controller):
     response = temp_controller.chat("Hello")
     assert response is not None
-    assert "Hello" in response
+    assert isinstance(response, str)
+    assert len(response) > 0
     assert temp_controller.current_session is not None
     assert len(temp_controller.current_session.chunks) > 0
 

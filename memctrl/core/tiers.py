@@ -145,6 +145,9 @@ Tier0_GPU = Tier0_Active
 class Tier1_RAM:
     """Compressed RAM storage with summarization."""
 
+    _local_summarizer = None
+    _local_tokenizer = None
+
     def __init__(
         self,
         max_tokens: Optional[int] = None,
@@ -213,6 +216,7 @@ class Tier1_RAM:
             return
         max_summary_words = int(chunk.tokens / config.compression_ratio) * 2
 
+        # Priority: LLM API → local summarization model → extractive fallback
         if self.llm and self.llm.provider_name != "echo":
             try:
                 chunk.summary = self._llm_summarize(
@@ -221,7 +225,14 @@ class Tier1_RAM:
                 chunk.compression_ratio = config.compression_ratio
                 return
             except Exception as e:
-                logger.warning("LLM compression failed, falling back to extractive: %s", e)
+                logger.warning("LLM compression failed, trying local model: %s", e)
+
+        try:
+            chunk.summary = self._local_summarize(chunk.content, max_summary_words)
+            chunk.compression_ratio = config.compression_ratio
+            return
+        except Exception as e:
+            logger.debug("Local summarization unavailable, falling back to extractive: %s", e)
 
         chunk.summary = self._extractive_summarize(chunk.content, max_summary_words)
         chunk.compression_ratio = config.compression_ratio
@@ -275,6 +286,38 @@ class Tier1_RAM:
             {"role": "user", "content": summary},
         ]
         return self.llm.generate(messages, max_tokens=len(summary.split()) * 4)
+
+    @classmethod
+    def _load_local_summarizer(cls):
+        """Lazy-load distilbart for local summarization. One-time download."""
+        if cls._local_summarizer is None:
+            from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+            model_name = "sshleifer/distilbart-cnn-12-6"
+            cls._local_tokenizer = AutoTokenizer.from_pretrained(model_name)
+            cls._local_summarizer = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+        return cls._local_summarizer, cls._local_tokenizer
+
+    @classmethod
+    def _local_summarize(cls, text: str, max_words: int) -> str:
+        """Summarize using a local distilbart model. Free, no API calls."""
+        import torch
+
+        # Skip local model for short text — BART hallucinates on tiny inputs
+        if len(text.split()) < 20:
+            raise ValueError("Text too short for abstractive summarization")
+
+        model, tokenizer = cls._load_local_summarizer()
+        max_length = max(15, max_words * 2)
+
+        inputs = tokenizer(text, return_tensors="pt", max_length=1024, truncation=True)
+        with torch.no_grad():
+            summary_ids = model.generate(
+                inputs["input_ids"],
+                max_length=max_length,
+                min_length=min(10, max_length - 1),
+                num_beams=4,
+            )
+        return tokenizer.decode(summary_ids[0], skip_special_tokens=True)
 
     @staticmethod
     def _extractive_summarize(text: str, max_words: int) -> str:

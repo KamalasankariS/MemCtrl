@@ -144,7 +144,7 @@ class OllamaLLM(LLMBackend):
 
     def __init__(
         self,
-        model: str = "llama3.2",
+        model: str = "llama3",
         host: str = "http://localhost:11434",
     ):
         self.model = model
