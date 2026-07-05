@@ -108,6 +108,32 @@ class SQLiteStore:
                 END
             """)
 
+            # Trash table for soft-deleted chunks
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS trash (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chunk_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    task_type TEXT,
+                    created_at TEXT NOT NULL,
+                    deleted_at TEXT NOT NULL
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trash_user ON trash(user_id)")
+
+            # Audit log for all memory operations
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    details TEXT
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id)")
+
     def _row_to_chunk(self, row: sqlite3.Row) -> Chunk:
         data = dict(row)
         data["timestamp"] = data["created_at"]
@@ -319,6 +345,84 @@ class SQLiteStore:
             )
             data["preferences"] = json.loads(data["preferences"]) if data["preferences"] else {}
             return User.from_dict(data)
+
+    # -- Trash operations --
+
+    def store_trash_item(self, user_id: str, item: Dict[str, Any]) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO trash (chunk_id, user_id, content, task_type, created_at, deleted_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item["chunk_id"],
+                    user_id,
+                    item["content"],
+                    item.get("task_type"),
+                    item.get("timestamp", ""),
+                    item.get("deleted_at", ""),
+                ),
+            )
+            return True
+
+    def get_trash(self, user_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM trash WHERE user_id = ? ORDER BY deleted_at DESC LIMIT ?",
+                (user_id, limit),
+            )
+            return [
+                {
+                    "chunk_id": row["chunk_id"],
+                    "content": row["content"],
+                    "task_type": row["task_type"],
+                    "timestamp": row["created_at"],
+                    "deleted_at": row["deleted_at"],
+                }
+                for row in cursor.fetchall()
+            ]
+
+    def delete_trash_item(self, chunk_id: str) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM trash WHERE chunk_id = ?", (chunk_id,))
+            return cursor.rowcount > 0
+
+    # -- Audit log operations --
+
+    def store_audit_entry(self, entry: Dict[str, Any]) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO audit_log (timestamp, action, user_id, details) VALUES (?, ?, ?, ?)",
+                (
+                    entry["timestamp"],
+                    entry["action"],
+                    entry["user_id"],
+                    json.dumps(entry.get("details", {})),
+                ),
+            )
+            return True
+
+    def get_audit_log(self, user_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM audit_log WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
+                (user_id, limit),
+            )
+            return [
+                {
+                    "timestamp": row["timestamp"],
+                    "action": row["action"],
+                    "user_id": row["user_id"],
+                    "details": json.loads(row["details"]) if row["details"] else {},
+                }
+                for row in cursor.fetchall()
+            ]
 
     # -- Statistics --
 

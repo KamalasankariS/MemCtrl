@@ -1,8 +1,9 @@
 import json
 import logging
+import re
 from typing import Optional, List, Dict, Any
 from uuid import uuid4
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .models import Chunk, Session, User, ChunkType, ChunkPriority
 from .core.tiers import TierManager, compute_task_aware_priority
@@ -44,8 +45,9 @@ class MemoryController:
         self.user_id = user_id or str(uuid4())
         self.user = self._load_or_create_user(self.user_id)
         self.current_session: Optional[Session] = None
-        self.audit_log: List[Dict[str, Any]] = []
-        self.trash: List[Dict[str, Any]] = []
+        # Load persisted trash and audit log from SQLite
+        self.trash: List[Dict[str, Any]] = self.tier_manager.tier2.store.get_trash(self.user_id)
+        self.audit_log: List[Dict[str, Any]] = self.tier_manager.tier2.store.get_audit_log(self.user_id)
 
     def _load_or_create_user(self, user_id: str) -> User:
         user = self.tier_manager.tier2.store.retrieve_user(user_id)
@@ -74,12 +76,14 @@ class MemoryController:
         )
 
     def _log_action(self, action: str, details: Dict[str, Any]):
-        self.audit_log.append({
+        entry = {
             "timestamp": datetime.now().isoformat(),
             "action": action,
             "user_id": self.user_id,
             "details": details,
-        })
+        }
+        self.audit_log.append(entry)
+        self.tier_manager.tier2.store.store_audit_entry(entry)
 
     def _build_context_messages(self, query: str) -> List[Dict[str, str]]:
         """Build LLM messages from pinned memory, recent context, and the current query."""
@@ -343,13 +347,15 @@ class MemoryController:
             }
 
         for chunk in matches:
-            self.trash.append({
+            trash_item = {
                 "chunk_id": chunk.id,
                 "content": chunk.content,
                 "task_type": chunk.task_type,
                 "timestamp": chunk.timestamp.isoformat(),
                 "deleted_at": datetime.now().isoformat(),
-            })
+            }
+            self.trash.append(trash_item)
+            self.tier_manager.tier2.store.store_trash_item(self.user_id, trash_item)
             self.tier_manager.remove_chunk(chunk.id)
             self.user.forget_chunk(chunk.id)
 
@@ -536,6 +542,7 @@ class MemoryController:
                     chunk, user_id=self.user_id, session_id=session.id,
                 )
                 self.trash.pop(i)
+                self.tier_manager.tier2.store.delete_trash_item(chunk_id)
                 self._log_action("restore", {"chunk_id": chunk_id})
                 return {"success": True, "message": f"Restored chunk {chunk_id[:8]}..."}
         return {"success": False, "message": "Chunk not found in trash"}
@@ -554,6 +561,208 @@ class MemoryController:
             return {"success": True, "message": f"Unpinned {chunk_id[:8]}..."}
         return {"success": False, "message": "Chunk not found or not pinned"}
 
+    # -- Smart Suggestions (suggest, never decide) --
+
+    # Patterns that indicate critical information worth pinning
+    _CRITICAL_PATTERNS = [
+        # Credentials and connection strings
+        (r'(?:password|passwd|pwd|secret|token|api.?key)\s*(?:is|=|:)\s*\S+', 'credential'),
+        (r'(?:postgresql|mysql|mongodb|redis|sqlite)://\S+', 'connection_string'),
+        (r'sk-[a-zA-Z0-9]{20,}', 'api_key'),
+        # Medical
+        (r'\b(?:allergic|allergy)\s+(?:to\s+)?\w+', 'allergy'),
+        (r'\b\d+\s*(?:mg|mcg|ml|units?)(?:/(?:day|daily|kg|dose))?\b', 'dosage'),
+        (r'\b(?:diagnosed|diagnosis)\s+(?:with\s+)?\w+', 'diagnosis'),
+        (r'\bHbA1c\s*(?:is|was|=|:)\s*[\d.]+', 'lab_result'),
+        (r'\b(?:BP|blood pressure)\s*(?:is|was|=|:)?\s*\d+/\d+', 'vital_sign'),
+        # Technical specifics
+        (r'(?:port|PORT)\s*(?:is|=|:)\s*\d{2,5}', 'port'),
+        (r'https?://\S+(?:webhook|notify|callback)\S*', 'webhook_url'),
+    ]
+
+    def suggest_pins(self) -> List[Dict[str, Any]]:
+        """Detect critical information in recent messages and suggest pinning.
+
+        Returns a list of suggestions. The user decides whether to accept each one.
+        MemCtrl never auto-pins — it only suggests.
+        """
+        suggestions = []
+        seen_contents = set()
+
+        # Check recent chunks in Tier0 and Tier1
+        all_chunks = self.tier_manager.tier0.get_all() + self.tier_manager.tier1.get_all()
+        for chunk in all_chunks:
+            if chunk.is_pinned:
+                continue
+
+            content = chunk.content
+            for pattern, category in self._CRITICAL_PATTERNS:
+                match = re.search(pattern, content, re.IGNORECASE)
+                if match:
+                    matched_text = match.group(0)
+                    if matched_text in seen_contents:
+                        continue
+                    seen_contents.add(matched_text)
+
+                    suggestions.append({
+                        "chunk_id": chunk.id,
+                        "category": category,
+                        "matched_text": matched_text,
+                        "content_preview": content[:100] + "..." if len(content) > 100 else content,
+                        "reason": f"Detected {category.replace('_', ' ')} — this looks important. Pin it?",
+                    })
+
+        return suggestions
+
+    def accept_pin_suggestion(self, chunk_id: str) -> Dict[str, Any]:
+        """Accept a pin suggestion. Pins the chunk."""
+        chunk = self.tier_manager.tier0.get(chunk_id) or self.tier_manager.tier1.get(chunk_id)
+        if not chunk:
+            return {"success": False, "message": "Chunk not found"}
+
+        chunk.is_pinned = True
+        chunk.priority = ChunkPriority.USER_PINNED
+        self.user.pin_chunk(chunk.id)
+        self.tier_manager.tier2.store.store_chunk(chunk)
+        self.tier_manager.tier2.store.store_user(self.user)
+        self._log_action("accept_pin_suggestion", {"chunk_id": chunk_id})
+        return {"success": True, "message": f"Pinned {chunk_id[:8]}..."}
+
+    def suggest_cleanup(self, stale_hours: float = 24.0) -> List[Dict[str, Any]]:
+        """Find stale chunks and suggest deletion with token savings estimate.
+
+        Returns suggestions for chunks not accessed since stale_hours ago.
+        The user decides whether to keep or delete each one.
+        """
+        cutoff = datetime.now() - timedelta(hours=stale_hours)
+        suggestions = []
+
+        all_chunks = self.tier_manager.tier0.get_all() + self.tier_manager.tier1.get_all()
+        for chunk in all_chunks:
+            if chunk.is_pinned:
+                continue
+            if chunk.last_accessed < cutoff:
+                age_hours = (datetime.now() - chunk.last_accessed).total_seconds() / 3600
+                suggestions.append({
+                    "chunk_id": chunk.id,
+                    "content_preview": chunk.content[:80] + "..." if len(chunk.content) > 80 else chunk.content,
+                    "task_type": chunk.task_type or "unclassified",
+                    "tokens": chunk.tokens,
+                    "last_accessed": chunk.last_accessed.isoformat(),
+                    "hours_stale": round(age_hours, 1),
+                    "reason": (
+                        f"Not accessed in {round(age_hours, 1)} hours. "
+                        f"Deleting saves {chunk.tokens} tokens."
+                    ),
+                })
+
+        # Sort by staleness (most stale first)
+        suggestions.sort(key=lambda s: s["hours_stale"], reverse=True)
+
+        if suggestions:
+            total_tokens = sum(s["tokens"] for s in suggestions)
+            for s in suggestions:
+                s["total_recoverable_tokens"] = total_tokens
+
+        return suggestions
+
+    def accept_cleanup(self, chunk_ids: List[str]) -> Dict[str, Any]:
+        """Accept cleanup suggestions. Moves chunks to trash."""
+        deleted = 0
+        tokens_saved = 0
+        for chunk_id in chunk_ids:
+            chunk = self.tier_manager.tier0.get(chunk_id) or self.tier_manager.tier1.get(chunk_id)
+            if chunk and not chunk.is_pinned:
+                trash_item = {
+                    "chunk_id": chunk.id,
+                    "content": chunk.content,
+                    "task_type": chunk.task_type,
+                    "timestamp": chunk.timestamp.isoformat(),
+                    "deleted_at": datetime.now().isoformat(),
+                }
+                self.trash.append(trash_item)
+                self.tier_manager.tier2.store.store_trash_item(self.user_id, trash_item)
+                tokens_saved += chunk.tokens
+                self.tier_manager.remove_chunk(chunk.id)
+                deleted += 1
+
+        self._log_action("accept_cleanup", {"num_deleted": deleted, "tokens_saved": tokens_saved})
+        return {
+            "success": True,
+            "num_deleted": deleted,
+            "tokens_saved": tokens_saved,
+            "message": f"Cleaned up {deleted} stale chunks, saved {tokens_saved} tokens",
+        }
+
+    # -- Context Budget Debugger --
+
+    def budget_report(self, max_tokens: int = 4096) -> Dict[str, Any]:
+        """Show exactly where tokens are being spent in the context window.
+
+        Returns a breakdown of token usage by category so users can see
+        what's consuming their budget and make informed decisions.
+        """
+        # System prompt
+        pinned = self.tier_manager.tier2.get_pinned(self.user_id)
+        system_parts = ["You are a helpful assistant."]
+        if pinned:
+            pinned_text = "\n".join(f"- {c.content}" for c in pinned)
+            system_parts.append(f"The user has pinned the following information:\n{pinned_text}")
+        system_content = " ".join(system_parts)
+        system_tokens = count_tokens(system_content, self.config.tokenizer_model)
+
+        # Pinned tokens (subset of system)
+        pinned_tokens = sum(
+            count_tokens(c.content, self.config.tokenizer_model) for c in pinned
+        )
+
+        # Active (Tier0) tokens
+        tier0_chunks = self.tier_manager.tier0.get_all()
+        active_tokens = sum(c.tokens for c in tier0_chunks if not c.is_pinned)
+        active_count = sum(1 for c in tier0_chunks if not c.is_pinned)
+
+        # Compressed (Tier1) tokens
+        tier1_chunks = self.tier_manager.tier1.get_all()
+        compressed_tokens = sum(
+            count_tokens(c.summary or c.content, self.config.tokenizer_model)
+            for c in tier1_chunks
+        )
+        compressed_count = len(tier1_chunks)
+
+        total_used = system_tokens + active_tokens + compressed_tokens
+        remaining = max(0, max_tokens - total_used)
+        usage_pct = round(total_used / max_tokens * 100, 1) if max_tokens > 0 else 0
+
+        return {
+            "max_tokens": max_tokens,
+            "total_used": total_used,
+            "remaining": remaining,
+            "usage_pct": usage_pct,
+            "breakdown": {
+                "system_prompt": {"tokens": system_tokens - pinned_tokens, "label": "System prompt"},
+                "pinned": {"tokens": pinned_tokens, "count": len(pinned), "label": "Pinned memories"},
+                "active": {"tokens": active_tokens, "count": active_count, "label": "Active messages"},
+                "compressed": {"tokens": compressed_tokens, "count": compressed_count, "label": "Compressed messages"},
+            },
+            "recommendations": self._budget_recommendations(
+                usage_pct, pinned_tokens, active_tokens, compressed_tokens, remaining,
+            ),
+        }
+
+    def _budget_recommendations(
+        self, usage_pct, pinned_tokens, active_tokens, compressed_tokens, remaining,
+    ) -> List[str]:
+        recs = []
+        if usage_pct > 90:
+            recs.append("Context is over 90% full. Consider forgetting old messages or running suggest_cleanup().")
+        if pinned_tokens > active_tokens and pinned_tokens > 500:
+            recs.append(f"Pinned memories use {pinned_tokens} tokens. Review pins — unpin anything no longer needed.")
+        if remaining < 200:
+            recs.append(f"Only {remaining} tokens remaining. New messages may trigger auto-eviction.")
+        if usage_pct < 30:
+            recs.append("Plenty of budget remaining. No action needed.")
+        return recs
+
     def close_session(self):
         if self.current_session:
             self.current_session.close()
@@ -569,3 +778,129 @@ class MemoryController:
     def _auto_evict(self):
         evicted = self.tier_manager.task_aware_evict()
         self._log_action("auto_evict", {"num_evicted": evicted, "reason": "memory_pressure"})
+
+
+def wrap(client, max_tokens: int = 4096, user_id: Optional[str] = None, **kwargs):
+    """Wrap an OpenAI or Anthropic client with automatic memory management.
+
+    Usage:
+        import openai
+        client = openai.OpenAI(api_key="sk-...")
+        wrapped = memctrl.wrap(client, max_tokens=4096)
+
+        # Use normally — memctrl optimizes context automatically
+        response = wrapped.chat("Hello, help me debug my Flask app")
+        response = wrapped.chat("The error is on line 42")
+
+    The wrapper intercepts messages, manages memory tiers, and
+    ensures the conversation fits within the token budget.
+    """
+    return WrappedClient(client, max_tokens=max_tokens, user_id=user_id, **kwargs)
+
+
+class WrappedClient:
+    """Transparent wrapper around an LLM client with automatic memory management."""
+
+    def __init__(self, client, max_tokens: int = 4096, user_id: Optional[str] = None, **kwargs):
+        self._client = client
+        self._max_tokens = max_tokens
+        self._provider = self._detect_provider(client)
+
+        # Create a MemoryController with echo LLM (we use the user's client for generation)
+        self.mc = MemoryController(
+            user_id=user_id,
+            provider="echo",
+            **kwargs,
+        )
+
+    @staticmethod
+    def _detect_provider(client) -> str:
+        module = type(client).__module__ or ""
+        if "anthropic" in module:
+            return "anthropic"
+        if "openai" in module:
+            return "openai"
+        return "openai"  # default to OpenAI-compatible
+
+    def chat(self, message: str, **kwargs) -> str:
+        """Send a message and get a response with automatic memory management.
+
+        Args:
+            message: The user's message
+            **kwargs: Extra args passed to the underlying API call
+                      (model, temperature, etc.)
+
+        Returns:
+            The assistant's response text.
+        """
+        # Record the user message in memory
+        self.mc.add_message("user", message)
+
+        # Build optimized context
+        messages = self.mc.optimize(max_tokens=self._max_tokens)
+
+        # Call the underlying client
+        response_text = self._call_client(messages, **kwargs)
+
+        # Record the assistant response in memory
+        self.mc.add_message("assistant", response_text)
+
+        return response_text
+
+    def _call_client(self, messages: List[Dict[str, str]], **kwargs) -> str:
+        if self._provider == "anthropic":
+            return self._call_anthropic(messages, **kwargs)
+        return self._call_openai(messages, **kwargs)
+
+    def _call_anthropic(self, messages: List[Dict[str, str]], **kwargs) -> str:
+        system_msg = None
+        chat_messages = []
+        for msg in messages:
+            if msg["role"] == "system":
+                system_msg = msg["content"]
+            else:
+                chat_messages.append(msg)
+
+        call_kwargs = {"messages": chat_messages, "max_tokens": kwargs.pop("max_tokens", 1024)}
+        if system_msg:
+            call_kwargs["system"] = system_msg
+        if "model" not in kwargs:
+            kwargs["model"] = "claude-sonnet-4-20250514"
+        call_kwargs.update(kwargs)
+
+        response = self._client.messages.create(**call_kwargs)
+        return response.content[0].text
+
+    def _call_openai(self, messages: List[Dict[str, str]], **kwargs) -> str:
+        if "model" not in kwargs:
+            kwargs["model"] = "gpt-4o-mini"
+        if "max_tokens" not in kwargs:
+            kwargs["max_tokens"] = 1024
+
+        response = self._client.chat.completions.create(
+            messages=messages,
+            **kwargs,
+        )
+        return response.choices[0].message.content
+
+    # Expose MemoryController methods for advanced usage
+    def pin(self, content: str, **kwargs):
+        return self.mc.pin(content, **kwargs)
+
+    def forget(self, query: str, **kwargs):
+        return self.mc.forget(query, **kwargs)
+
+    def suggest_pins(self):
+        return self.mc.suggest_pins()
+
+    def suggest_cleanup(self, **kwargs):
+        return self.mc.suggest_cleanup(**kwargs)
+
+    def budget_report(self):
+        return self.mc.budget_report(max_tokens=self._max_tokens)
+
+    def show_memory(self, **kwargs):
+        return self.mc.show_memory(**kwargs)
+
+    def get_stats(self):
+        return self.mc.get_stats()
