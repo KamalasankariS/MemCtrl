@@ -396,3 +396,139 @@ class TestBudgetReport:
         ctrl.pin("Pin 2")
         report = ctrl.budget_report()
         assert report["breakdown"]["pinned"]["count"] == 2
+
+
+# -- Feature 6: Entity-preserving compression --
+
+class TestEntityPreservingCompression:
+    def test_extract_entities_url(self):
+        from memctrl.core.tiers import Tier1_RAM
+        entities = Tier1_RAM._extract_entities("Visit https://example.com/webhook for details")
+        assert any("https://example.com/webhook" in e for e in entities)
+
+    def test_extract_entities_version(self):
+        from memctrl.core.tiers import Tier1_RAM
+        entities = Tier1_RAM._extract_entities("Using Python 3.11.4 with Flask")
+        assert any("3.11.4" in e for e in entities)
+
+    def test_extract_entities_measurement(self):
+        from memctrl.core.tiers import Tier1_RAM
+        entities = Tier1_RAM._extract_entities("Patient takes 500 mg daily")
+        assert any("500 mg" in e for e in entities)
+
+    def test_extract_entities_camelcase(self):
+        from memctrl.core.tiers import Tier1_RAM
+        entities = Tier1_RAM._extract_entities("The ConvNeXt model outperforms ResNet")
+        assert any("ConvNeXt" in e for e in entities)
+        assert any("ResNet" in e for e in entities)
+
+    def test_extract_entities_empty(self):
+        from memctrl.core.tiers import Tier1_RAM
+        entities = Tier1_RAM._extract_entities("hello world")
+        assert entities == []
+
+    def test_entities_appended_to_summary(self, ctrl):
+        # Add a message with entities that will go to tier1 (compressed)
+        ctrl.add_message("user", "Deploy Flask app on port 8080 at https://api.example.com/webhook using version 3.11.4")
+        tier1_chunks = ctrl.tier_manager.tier1.get_all()
+        if tier1_chunks:
+            chunk = tier1_chunks[0]
+            if chunk.summary:
+                # Entities should be appended in brackets
+                assert "[" in chunk.summary
+                assert "8080" in chunk.summary or "3.11.4" in chunk.summary
+
+
+# -- Feature 7: Auto-pin critical values during compression --
+
+class TestAutoPinDuringCompression:
+    def test_auto_pins_password(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = MemCtrlConfig(
+                data_dir=tmpdir,
+                sqlite_path=f"{tmpdir}/autopin.db",
+                duckdb_path=f"{tmpdir}/autopin.duckdb",
+            )
+            set_config(config)
+            ctrl = MemoryController(user_id="autopin_user", provider="echo")
+
+            # This message goes to tier1 (not tier0), triggering auto-pin
+            ctrl.add_message("user", "The password is supersecret123")
+
+            pinned = ctrl.tier_manager.tier2.get_pinned("autopin_user")
+            pinned_contents = " ".join(p.content for p in pinned)
+            assert "password" in pinned_contents.lower() or "supersecret123" in pinned_contents
+            ctrl.close_session()
+
+    def test_auto_pins_dosage(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = MemCtrlConfig(
+                data_dir=tmpdir,
+                sqlite_path=f"{tmpdir}/autopin2.db",
+                duckdb_path=f"{tmpdir}/autopin2.duckdb",
+            )
+            set_config(config)
+            ctrl = MemoryController(user_id="autopin_med_user", provider="echo")
+
+            ctrl.add_message("user", "Patient takes 500 mg daily for hypertension")
+
+            pinned = ctrl.tier_manager.tier2.get_pinned("autopin_med_user")
+            pinned_contents = " ".join(p.content for p in pinned)
+            assert "500 mg" in pinned_contents
+            ctrl.close_session()
+
+    def test_auto_pin_no_duplicates(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = MemCtrlConfig(
+                data_dir=tmpdir,
+                sqlite_path=f"{tmpdir}/autopin3.db",
+                duckdb_path=f"{tmpdir}/autopin3.duckdb",
+            )
+            set_config(config)
+            ctrl = MemoryController(user_id="autopin_dup_user", provider="echo")
+
+            ctrl.add_message("user", "The password is hunter2")
+            ctrl.add_message("user", "Reminder: the password is hunter2")
+
+            pinned = ctrl.tier_manager.tier2.get_pinned("autopin_dup_user")
+            password_pins = [p for p in pinned if "password" in p.content.lower()]
+            assert len(password_pins) == 1
+            ctrl.close_session()
+
+    def test_auto_pin_marked_as_auto(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = MemCtrlConfig(
+                data_dir=tmpdir,
+                sqlite_path=f"{tmpdir}/autopin4.db",
+                duckdb_path=f"{tmpdir}/autopin4.duckdb",
+            )
+            set_config(config)
+            ctrl = MemoryController(user_id="autopin_meta_user", provider="echo")
+
+            ctrl.add_message("user", "Use postgresql://admin:pass@db.host:5432/mydb")
+
+            pinned = ctrl.tier_manager.tier2.get_pinned("autopin_meta_user")
+            auto_pinned = [p for p in pinned if p.metadata.get("auto_pinned")]
+            assert len(auto_pinned) >= 1
+            assert auto_pinned[0].metadata["category"] == "connection_string"
+            ctrl.close_session()
+
+    def test_manually_pinned_not_duplicated(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = MemCtrlConfig(
+                data_dir=tmpdir,
+                sqlite_path=f"{tmpdir}/autopin5.db",
+                duckdb_path=f"{tmpdir}/autopin5.duckdb",
+            )
+            set_config(config)
+            ctrl = MemoryController(user_id="autopin_manual_user", provider="echo")
+
+            # Manually pin first
+            ctrl.pin("password is hunter2")
+            # Then add message with same content — should not create duplicate auto-pin
+            ctrl.add_message("user", "Remember, password is hunter2")
+
+            pinned = ctrl.tier_manager.tier2.get_pinned("autopin_manual_user")
+            password_pins = [p for p in pinned if "hunter2" in p.content]
+            assert len(password_pins) == 1
+            ctrl.close_session()

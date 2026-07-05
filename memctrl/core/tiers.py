@@ -1,9 +1,11 @@
 import logging
+import re
 from datetime import datetime
-from typing import List, Optional, Dict, TYPE_CHECKING
+from typing import List, Optional, Dict, Set, TYPE_CHECKING
 from collections import OrderedDict
+from uuid import uuid4
 
-from ..models import Chunk, ChunkPriority
+from ..models import Chunk, ChunkPriority, ChunkType
 from ..config import get_config
 from ..storage.sqlite_store import SQLiteStore
 from ..storage.embedding_store import EmbeddingStore
@@ -210,11 +212,55 @@ class Tier1_RAM:
             "num_chunks": len(self.storage),
         }
 
+    # Regex patterns for entities that must survive compression
+    _ENTITY_PATTERNS = [
+        (r'\b\d+\.\d+\.\d+(?:\.\d+)?\b', 'version'),           # version numbers
+        (r'\b\d{1,3}(?:,\d{3})+\b', 'number'),                  # formatted numbers like 101,770
+        (r'\b\d+(?:\.\d+)?%\b', 'percentage'),                  # percentages
+        (r'\b\d+\s*(?:mg|mcg|ml|units?|kg|lbs?|°[CF])\b', 'measurement'),  # measurements
+        (r'\b\d+/\d+\b', 'ratio'),                              # ratios like BP 120/80
+        (r'https?://\S+', 'url'),                               # URLs
+        (r'(?:port|PORT)\s*(?:is|=|:)\s*\d{2,5}', 'port'),     # port numbers
+        (r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b', 'identifier'),    # CamelCase identifiers
+        (r'\b[a-z_]+\.[a-z_]+\(\)', 'function_call'),           # function calls
+        (r'(?:postgresql|mysql|mongodb|redis|sqlite)://\S+', 'connection_string'),
+        (r'sk-[a-zA-Z0-9]{20,}', 'api_key'),                   # API keys
+        (r'\bHbA1c\s*(?:is|was|=|:)?\s*[\d.]+', 'lab_result'), # lab results
+    ]
+
+    # Patterns that trigger auto-pinning during compression
+    _AUTO_PIN_PATTERNS = [
+        (r'(?:password|passwd|pwd|secret|token|api.?key)\s*(?:is|=|:)\s*\S+', 'credential'),
+        (r'(?:postgresql|mysql|mongodb|redis|sqlite)://\S+', 'connection_string'),
+        (r'sk-[a-zA-Z0-9]{20,}', 'api_key'),
+        (r'\b(?:allergic|allergy)\s+(?:to\s+)?\w+', 'allergy'),
+        (r'\b\d+\s*(?:mg|mcg|ml|units?)(?:/(?:day|daily|kg|dose))?\b', 'dosage'),
+        (r'\b(?:diagnosed|diagnosis)\s+(?:with\s+)?\w+', 'diagnosis'),
+        (r'\bHbA1c\s*(?:is|was|=|:)\s*[\d.]+', 'lab_result'),
+        (r'\b(?:BP|blood pressure)\s*(?:is|was|=|:)?\s*\d+/\d+', 'vital_sign'),
+    ]
+
+    @classmethod
+    def _extract_entities(cls, text: str) -> List[str]:
+        """Extract named entities that must survive compression."""
+        entities: List[str] = []
+        seen: Set[str] = set()
+        for pattern, label in cls._ENTITY_PATTERNS:
+            for match in re.finditer(pattern, text):
+                value = match.group(0).strip()
+                if value not in seen and len(value) > 2:
+                    seen.add(value)
+                    entities.append(f"{label}: {value}")
+        return entities
+
     def _compress(self, chunk: Chunk):
         config = get_config()
         if chunk.summary:
             return
         max_summary_words = int(chunk.tokens / config.compression_ratio) * 2
+
+        # Extract entities before summarizing — these will be appended
+        entities = self._extract_entities(chunk.content)
 
         # Priority: LLM API → local summarization model → extractive fallback
         if self.llm and self.llm.provider_name != "echo":
@@ -223,6 +269,8 @@ class Tier1_RAM:
                     chunk.content, max_summary_words, chunk.task_type,
                 )
                 chunk.compression_ratio = config.compression_ratio
+                if entities:
+                    chunk.summary += " [" + "; ".join(entities) + "]"
                 return
             except Exception as e:
                 logger.warning("LLM compression failed, trying local model: %s", e)
@@ -230,12 +278,16 @@ class Tier1_RAM:
         try:
             chunk.summary = self._local_summarize(chunk.content, max_summary_words)
             chunk.compression_ratio = config.compression_ratio
+            if entities:
+                chunk.summary += " [" + "; ".join(entities) + "]"
             return
         except Exception as e:
             logger.debug("Local summarization unavailable, falling back to extractive: %s", e)
 
         chunk.summary = self._extractive_summarize(chunk.content, max_summary_words)
         chunk.compression_ratio = config.compression_ratio
+        if entities:
+            chunk.summary += " [" + "; ".join(entities) + "]"
 
     def _llm_summarize(
         self, text: str, max_words: int, task_type: Optional[str] = None,
@@ -483,7 +535,49 @@ class TierManager:
             if self.tier0.add(chunk, force=chunk.is_pinned):
                 return True
 
+        # Auto-pin critical values before compression loses them
+        self._auto_pin_critical(chunk, user_id, session_id)
+
         return self.tier1.add(chunk)
+
+    def _auto_pin_critical(self, chunk: Chunk, user_id: str, session_id: str):
+        """Auto-pin critical values found in a chunk heading to compression.
+
+        Creates small pinned chunks for credentials, medical data, etc.
+        so they survive summarization. Pinning is silent — deletion still
+        requires user confirmation.
+        """
+        from ..tokenizer import count_tokens
+
+        for pattern, category in Tier1_RAM._AUTO_PIN_PATTERNS:
+            match = re.search(pattern, chunk.content, re.IGNORECASE)
+            if match:
+                matched_text = match.group(0)
+                # Don't duplicate — check if already pinned
+                existing_pinned = self.tier2.get_pinned(user_id)
+                if any(matched_text in p.content for p in existing_pinned):
+                    continue
+
+                config = get_config()
+                pin_content = f"[auto-pinned {category}] {matched_text}"
+                pin_chunk = Chunk(
+                    id=str(uuid4()),
+                    content=pin_content,
+                    tokens=count_tokens(pin_content, config.tokenizer_model),
+                    chunk_type=ChunkType.CONVERSATION,
+                    timestamp=datetime.now(),
+                    is_pinned=True,
+                    priority=ChunkPriority.USER_PINNED,
+                )
+                pin_chunk.metadata["user_id"] = user_id
+                pin_chunk.metadata["session_id"] = session_id
+                pin_chunk.metadata["auto_pinned"] = True
+                pin_chunk.metadata["source_chunk_id"] = chunk.id
+                pin_chunk.metadata["category"] = category
+
+                self.tier2.add(pin_chunk)
+                self.tier0.add(pin_chunk, force=True)
+                logger.info("Auto-pinned %s from chunk %s", category, chunk.id[:8])
 
     def get_chunk(self, chunk_id: str) -> Optional[Chunk]:
         chunk = self.tier0.get(chunk_id)
