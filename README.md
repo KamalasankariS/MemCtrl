@@ -1,7 +1,7 @@
 [![CI](https://github.com/KamalasankariS/MemCtrl/actions/workflows/ci.yml/badge.svg)](https://github.com/KamalasankariS/MemCtrl/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![PyPI](https://img.shields.io/pypi/v/memctrl.svg)](https://pypi.org/project/memctrl/)
+[![PyPI](https://img.shields.io/pypi/v/memctrl-llm.svg)](https://pypi.org/project/memctrl-llm/)
 
 # MemCtrl
 
@@ -34,15 +34,15 @@ Tested with Ollama (llama3) across 3 real-world scenarios:
 ## Install
 
 ```bash
-pip install memctrl
+pip install memctrl-llm
 ```
 
 With optional LLM backends:
 
 ```bash
-pip install memctrl[anthropic]   # For Claude
-pip install memctrl[openai]      # For GPT
-pip install memctrl[all]         # Everything
+pip install memctrl-llm[anthropic]   # For Claude
+pip install memctrl-llm[openai]      # For GPT
+pip install memctrl-llm[all]         # Everything
 ```
 
 ## Quick Start
@@ -265,7 +265,7 @@ export MEMCTRL_CONFIG=path/to/config.yaml
 ## Testing
 
 ```bash
-pip install memctrl[dev]
+pip install memctrl-llm[dev]
 pytest tests/ -o addopts="" -q
 ```
 

@@ -3,7 +3,7 @@ requires = ["setuptools>=65.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "memctrl"
+name = "memctrl-llm"
 version = "0.1.0"
 description = "Task-aware memory management for LLMs. Extend conversations 5.7x longer with 88% recall."
 readme = "README.md"
