@@ -214,18 +214,26 @@ class Tier1_RAM:
 
     # Regex patterns for entities that must survive compression
     _ENTITY_PATTERNS = [
-        (r'\b\d+\.\d+\.\d+(?:\.\d+)?\b', 'version'),           # version numbers
-        (r'\b\d{1,3}(?:,\d{3})+\b', 'number'),                  # formatted numbers like 101,770
-        (r'\b\d+(?:\.\d+)?%\b', 'percentage'),                  # percentages
-        (r'\b\d+\s*(?:mg|mcg|ml|units?|kg|lbs?|°[CF])\b', 'measurement'),  # measurements
-        (r'\b\d+/\d+\b', 'ratio'),                              # ratios like BP 120/80
-        (r'https?://\S+', 'url'),                               # URLs
-        (r'(?:port|PORT)\s*(?:is|=|:)\s*\d{2,5}', 'port'),     # port numbers
-        (r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b', 'identifier'),    # CamelCase identifiers
-        (r'\b[a-z_]+\.[a-z_]+\(\)', 'function_call'),           # function calls
+        (r'\b\d+\.\d+\.\d+(?:\.\d+)?\b', 'version'),
+        (r'\b\d{1,3}(?:,\d{3})+\b', 'number'),
+        (r'\b\d+(?:\.\d+)?%\b', 'percentage'),
+        (r'\b\d+\s*(?:mg|mcg|ml|units?|kg|lbs?|°[CF])\b', 'measurement'),
+        (r'\b\d+/\d+\b', 'ratio'),
+        (r'https?://\S+', 'url'),
+        (r'(?:port|PORT)\s*(?:is|=|:)\s*\d{2,5}', 'port'),
+        (r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b', 'identifier'),
+        (r'\b[a-z_]+\.[a-z_]+\(\)', 'function_call'),
         (r'(?:postgresql|mysql|mongodb|redis|sqlite)://\S+', 'connection_string'),
-        (r'sk-[a-zA-Z0-9]{20,}', 'api_key'),                   # API keys
-        (r'\bHbA1c\s*(?:is|was|=|:)?\s*[\d.]+', 'lab_result'), # lab results
+        (r'sk-[a-zA-Z0-9]{20,}', 'api_key'),
+        (r'\bHbA1c\s*(?:is|was|=|:)?\s*[\d.]+', 'lab_result'),
+        # snake_case identifiers (code fields, variables)
+        (r'\b[a-z]+(?:_[a-z]+){1,}\b', 'field'),
+        # Math notation with subscripts
+        (r'[a-z]_\{[^}]+\}', 'math_notation'),
+        # Standalone technical terms (capitalized, 5+ chars, not common)
+        (r'\b[A-Z][a-z]{4,}\b', 'term'),
+        # X-Header names
+        (r'X-[A-Za-z-]+', 'header'),
     ]
 
     # Patterns that trigger auto-pinning during compression
@@ -240,6 +248,18 @@ class Tier1_RAM:
         (r'\b(?:BP|blood pressure)\s*(?:is|was|=|:)?\s*\d+/\d+', 'vital_sign'),
     ]
 
+    # Common words to skip when extracting 'term' entities
+    _TERM_STOPWORDS = {
+        "About", "After", "Also", "Added", "Based", "Before",
+        "Change", "Check", "Could", "Create", "Default", "Every",
+        "First", "Found", "Great", "Here", "Important", "Layer",
+        "Leave", "Means", "Normal", "Other", "Perfect", "Preserve",
+        "Return", "Running", "Should", "Since", "Start", "Takes",
+        "Target", "That", "Their", "There", "These", "Those",
+        "Through", "Total", "Under", "Using", "Where", "Which",
+        "Works", "Would", "Your",
+    }
+
     @classmethod
     def _extract_entities(cls, text: str) -> List[str]:
         """Extract named entities that must survive compression."""
@@ -248,9 +268,12 @@ class Tier1_RAM:
         for pattern, label in cls._ENTITY_PATTERNS:
             for match in re.finditer(pattern, text):
                 value = match.group(0).strip()
-                if value not in seen and len(value) > 2:
-                    seen.add(value)
-                    entities.append(f"{label}: {value}")
+                if value in seen or len(value) <= 2:
+                    continue
+                if label == "term" and value in cls._TERM_STOPWORDS:
+                    continue
+                seen.add(value)
+                entities.append(f"{label}: {value}")
         return entities
 
     def _compress(self, chunk: Chunk):
@@ -540,12 +563,37 @@ class TierManager:
 
         return self.tier1.add(chunk)
 
-    def _auto_pin_critical(self, chunk: Chunk, user_id: str, session_id: str):
-        """Auto-pin critical values found in a chunk heading to compression.
+    @staticmethod
+    def _extract_sentence(text: str, match: re.Match) -> str:
+        """Extract the full sentence containing a regex match."""
+        start = match.start()
+        end = match.end()
 
-        Creates small pinned chunks for credentials, medical data, etc.
-        so they survive summarization. Pinning is silent — deletion still
-        requires user confirmation.
+        # Walk backward to find sentence start
+        sent_start = start
+        while sent_start > 0 and text[sent_start - 1] not in '.!?\n':
+            sent_start -= 1
+
+        # Walk forward to find sentence end
+        sent_end = end
+        while sent_end < len(text) and text[sent_end] not in '.!?\n':
+            sent_end += 1
+        if sent_end < len(text):
+            sent_end += 1  # include the punctuation
+
+        sentence = text[sent_start:sent_end].strip()
+        # Strip role prefixes
+        for prefix in ("User: ", "Assistant: ", "System: "):
+            if sentence.startswith(prefix):
+                sentence = sentence[len(prefix):]
+        return sentence
+
+    def _auto_pin_critical(
+        self, chunk: Chunk, user_id: str, session_id: str,
+    ):
+        """Auto-pin critical values found in a chunk heading to
+        compression. Captures the full sentence for context, not just
+        the regex match. Deletion still requires user confirmation.
         """
         from ..tokenizer import count_tokens
 
@@ -558,12 +606,18 @@ class TierManager:
                 if any(matched_text in p.content for p in existing_pinned):
                     continue
 
+                # Extract the full sentence for context
+                sentence = self._extract_sentence(
+                    chunk.content, match,
+                )
                 config = get_config()
-                pin_content = f"[auto-pinned {category}] {matched_text}"
+                pin_content = sentence
                 pin_chunk = Chunk(
                     id=str(uuid4()),
                     content=pin_content,
-                    tokens=count_tokens(pin_content, config.tokenizer_model),
+                    tokens=count_tokens(
+                        pin_content, config.tokenizer_model,
+                    ),
                     chunk_type=ChunkType.CONVERSATION,
                     timestamp=datetime.now(),
                     is_pinned=True,
@@ -577,7 +631,10 @@ class TierManager:
 
                 self.tier2.add(pin_chunk)
                 self.tier0.add(pin_chunk, force=True)
-                logger.info("Auto-pinned %s from chunk %s", category, chunk.id[:8])
+                logger.info(
+                    "Auto-pinned %s from chunk %s",
+                    category, chunk.id[:8],
+                )
 
     def get_chunk(self, chunk_id: str) -> Optional[Chunk]:
         chunk = self.tier0.get(chunk_id)

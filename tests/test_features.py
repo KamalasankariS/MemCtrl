@@ -460,7 +460,8 @@ class TestAutoPinDuringCompression:
 
             pinned = ctrl.tier_manager.tier2.get_pinned("autopin_user")
             pinned_contents = " ".join(p.content for p in pinned)
-            assert "password" in pinned_contents.lower() or "supersecret123" in pinned_contents
+            # Full sentence should be captured, including the value
+            assert "supersecret123" in pinned_contents
             ctrl.close_session()
 
     def test_auto_pins_dosage(self):
@@ -508,12 +509,21 @@ class TestAutoPinDuringCompression:
             set_config(config)
             ctrl = MemoryController(user_id="autopin_meta_user", provider="echo")
 
-            ctrl.add_message("user", "Use postgresql://admin:pass@db.host:5432/mydb")
+            ctrl.add_message(
+                "user",
+                "Use postgresql://admin:pass@db.host:5432/mydb",
+            )
 
-            pinned = ctrl.tier_manager.tier2.get_pinned("autopin_meta_user")
-            auto_pinned = [p for p in pinned if p.metadata.get("auto_pinned")]
+            pinned = ctrl.tier_manager.tier2.get_pinned(
+                "autopin_meta_user",
+            )
+            auto_pinned = [
+                p for p in pinned if p.metadata.get("auto_pinned")
+            ]
             assert len(auto_pinned) >= 1
             assert auto_pinned[0].metadata["category"] == "connection_string"
+            # Full sentence should include the connection string
+            assert "postgresql://" in auto_pinned[0].content
             ctrl.close_session()
 
     def test_manually_pinned_not_duplicated(self):
