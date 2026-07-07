@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memctrl-llm"
-version = "0.1.0"
+version = "0.1.1"
 description = "Task-aware memory management for LLMs. Extend conversations 5.7x longer with 88% recall."
 readme = "README.md"
 requires-python = ">=3.10"
