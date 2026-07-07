@@ -366,7 +366,13 @@ class Tier1_RAM:
     def _load_local_summarizer(cls):
         """Lazy-load distilbart for local summarization. One-time download."""
         if cls._local_summarizer is None:
-            from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+            try:
+                from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+            except ImportError:
+                raise ImportError(
+                    "transformers not installed. Install with: "
+                    "pip install memctrl-llm[ml]"
+                )
             model_name = "sshleifer/distilbart-cnn-12-6"
             cls._local_tokenizer = AutoTokenizer.from_pretrained(model_name)
             cls._local_summarizer = AutoModelForSeq2SeqLM.from_pretrained(model_name)
@@ -509,16 +515,42 @@ class TierManager:
         self._task_classifier = None
         self._task_tokenizer = None
 
+    _KEYWORD_TASK_MAP = {
+        "medical": {
+            "patient", "diagnosis", "symptoms", "medication", "dosage",
+            "allergy", "blood", "pressure", "mg", "prescription",
+            "vitals", "lab", "ct", "mri", "biopsy", "treatment",
+        },
+        "code": {
+            "function", "class", "import", "def", "return", "error",
+            "debug", "api", "database", "sql", "git", "deploy",
+            "server", "endpoint", "bug", "exception", "traceback",
+        },
+        "tutoring": {
+            "explain", "learn", "understand", "example", "concept",
+            "homework", "study", "tutorial", "lesson", "practice",
+            "quiz", "exercise", "student", "teacher", "course",
+        },
+        "writing": {
+            "essay", "paragraph", "draft", "rewrite", "tone",
+            "proofread", "grammar", "outline", "article", "blog",
+            "story", "narrative", "edit", "revise", "manuscript",
+        },
+    }
+
     def _classify_task(self, text: str) -> Optional[str]:
-        """Classify the task type of a chunk using the trained classifier."""
+        """Classify task type. Uses neural model if available, else keywords."""
         if self._task_classifier is None:
             try:
                 from ..ml.task_classifier import TaskClassifier
+                from transformers import AutoTokenizer
                 from pathlib import Path
-                model_path = Path(__file__).parent.parent.parent / "models" / "task_classifier.pt"
+                model_path = (
+                    Path(__file__).parent.parent.parent
+                    / "models" / "task_classifier.pt"
+                )
                 if model_path.exists():
                     self._task_classifier = TaskClassifier.load(str(model_path))
-                    from transformers import AutoTokenizer
                     self._task_tokenizer = AutoTokenizer.from_pretrained(
                         self._task_classifier.model_name,
                     )
@@ -528,16 +560,30 @@ class TierManager:
                 logger.debug("Task classifier not available: %s", e)
                 self._task_classifier = False
 
-        if self._task_classifier is False:
-            return None
+        if self._task_classifier is not False:
+            try:
+                label, _ = self._task_classifier.predict(
+                    text, tokenizer=self._task_tokenizer,
+                )
+                return label
+            except Exception:
+                pass
 
-        try:
-            label, _ = self._task_classifier.predict(
-                text, tokenizer=self._task_tokenizer,
-            )
-            return label
-        except Exception:
-            return None
+        return self._keyword_classify(text)
+
+    def _keyword_classify(self, text: str) -> Optional[str]:
+        """Fallback keyword-based task classification."""
+        words = set(text.lower().split())
+        best_task = None
+        best_score = 0
+        for task, keywords in self._KEYWORD_TASK_MAP.items():
+            score = len(words & keywords)
+            if score > best_score:
+                best_score = score
+                best_task = task
+        if best_score >= 2:
+            return best_task
+        return None
 
     def _get_promotion_threshold(self, chunk: Chunk) -> float:
         """Get task-specific promotion threshold for Tier0."""

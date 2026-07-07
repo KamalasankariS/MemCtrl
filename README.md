@@ -34,10 +34,16 @@ Tested with Ollama (llama3) across 3 real-world scenarios:
 ## Install
 
 ```bash
-pip install memctrl-llm
+pip install memctrl-llm            # Lightweight (~2MB), uses extractive compression
 ```
 
-With optional LLM backends:
+With neural compression (distilbart + embeddings):
+
+```bash
+pip install memctrl-llm[ml]          # Adds torch, transformers, sentence-transformers
+```
+
+With LLM backends:
 
 ```bash
 pip install memctrl-llm[anthropic]   # For Claude
